@@ -68,6 +68,9 @@ export async function getSupabaseInitState(forceRefresh = false): Promise<Supaba
             serverDbError = data.serverDbError;
             break;
           }
+          if (url && anonKey && (res.status === 404 || res.status === 405 || !contentType.includes('application/json'))) {
+            break;
+          }
         } catch {
           // Retry briefly if server is still warming up
         }

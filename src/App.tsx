@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { Compass } from 'lucide-react';
 import { AuthGateView } from './components/AuthGateView';
@@ -70,7 +70,10 @@ function TourxAppInner() {
     listing?: string;
   }>({});
 
+  const activeUidRef = useRef<string | null>(null);
+
   const clearAuthenticatedState = useCallback(() => {
+    activeUidRef.current = null;
     setUserProfile(null);
     setHostPrivateInfo(null);
     setPublicListings([]);
@@ -83,11 +86,38 @@ function TourxAppInner() {
     setAuthModalOpen(false);
   }, []);
 
-  const syncProfileFromBackend = useCallback(async (accessToken?: string) => {
-    const { profile, privateInfo } = await fetchAuthenticatedProfile(accessToken);
-    setUserProfile(profile);
-    setHostPrivateInfo(privateInfo);
-  }, []);
+  const syncProfileFromBackend = useCallback(
+    async (accessToken?: string, preferredRole?: AccountType) => {
+      let targetRole = preferredRole;
+      try {
+        const pending = window.sessionStorage.getItem('tourx_pending_portal_role');
+        if (pending === 'host' || pending === 'traveller') {
+          targetRole = targetRole || pending;
+          window.sessionStorage.removeItem('tourx_pending_portal_role');
+        }
+      } catch {
+        // Ignore sessionStorage errors
+      }
+
+      let { profile, privateInfo } = await fetchAuthenticatedProfile(accessToken);
+      if (targetRole && profile.accountType !== targetRole) {
+        try {
+          const switched = await switchUserAccountRole(targetRole);
+          profile = switched.profile;
+          privateInfo = switched.privateInfo;
+        } catch {
+          // Proceed with loaded profile if role switch fails silently during auth
+        }
+      }
+      activeUidRef.current = profile.uid;
+      setUserProfile(profile);
+      setHostPrivateInfo(privateInfo);
+      if (targetRole === 'host' && profile.accountType === 'host') {
+        setActiveView('host');
+      }
+    },
+    [],
+  );
 
   // Listen for Google Maps Platform Case A quota exceeded events
   useEffect(() => {
@@ -146,6 +176,12 @@ function TourxAppInner() {
             }
             if (!session?.access_token) {
               clearAuthenticatedState();
+              return;
+            }
+            if (
+              (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') &&
+              activeUidRef.current === session.user.id
+            ) {
               return;
             }
             void syncProfileFromBackend(session.access_token).catch((err) => {
@@ -207,10 +243,13 @@ function TourxAppInner() {
 
   const handleSwitchRole = async (role: AccountType) => {
     const { profile, privateInfo } = await switchUserAccountRole(role);
+    activeUidRef.current = profile.uid;
     setUserProfile(profile);
     setHostPrivateInfo(privateInfo);
     if (role === 'host') {
       setActiveView('host');
+    } else if (activeView === 'host') {
+      setActiveView('discover');
     }
   };
 
@@ -364,6 +403,10 @@ function TourxAppInner() {
             onOpenHostAuth={() => {
               setAuthModalFocus('host');
               setAuthModalOpen(true);
+            }}
+            onSwitchToHost={() => handleSwitchRole('host')}
+            onSignOut={() => {
+              void handleSignOut();
             }}
             onSavePayoutSettings={async (input) => {
               return saveHostPayoutSettings(userProfile.uid, input);

@@ -98,6 +98,39 @@ function emitBackendChange(): void {
 
 const HOST_QR_STORAGE_KEY = 'tourx_host_qr_fallback';
 const LISTING_QR_STORAGE_KEY = 'tourx_listing_qr_fallback';
+const PORTAL_ROLE_OVERRIDE_KEY = 'tourx_portal_role_override';
+
+let apiBackendMode: 'unknown' | 'server' | 'supabase-direct' = 'unknown';
+
+function readPortalRoleOverride(uid: string): AccountType | null {
+  try {
+    const raw = window.localStorage.getItem(PORTAL_ROLE_OVERRIDE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    const val = parsed?.[uid];
+    if (val === 'host' || val === 'traveller') {
+      return val;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writePortalRoleOverride(uid: string, role: AccountType | null): void {
+  try {
+    const raw = window.localStorage.getItem(PORTAL_ROLE_OVERRIDE_KEY);
+    const parsed: Record<string, string> = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    if (role) {
+      parsed[uid] = role;
+    } else {
+      delete parsed[uid];
+    }
+    window.localStorage.setItem(PORTAL_ROLE_OVERRIDE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Ignore localStorage quota/private-mode errors
+  }
+}
 
 function readQrMap(storageKey: string): Record<string, string> {
   try {
@@ -300,6 +333,7 @@ async function apiJson<T>(
       ...init,
     });
   } catch {
+    apiBackendMode = 'supabase-direct';
     throw new BackendUnavailableError('Backend server unreachable.');
   }
 
@@ -319,6 +353,7 @@ async function apiJson<T>(
     res.status === 501 ||
     ((res.status === 502 || res.status === 504 || !res.ok) && !isJson)
   ) {
+    apiBackendMode = 'supabase-direct';
     throw new BackendUnavailableError(`API endpoint unavailable (${res.status}).`);
   }
 
@@ -339,9 +374,11 @@ async function apiJson<T>(
   }
 
   if (!isJson) {
+    apiBackendMode = 'supabase-direct';
     throw new BackendUnavailableError('Backend API returned HTML instead of JSON.');
   }
 
+  apiBackendMode = 'server';
   return (await res.json()) as T;
 }
 
@@ -349,6 +386,9 @@ async function withBackendFallback<T>(
   apiFn: () => Promise<T>,
   supabaseFn: () => Promise<T>,
 ): Promise<T> {
+  if (apiBackendMode === 'supabase-direct') {
+    return await supabaseFn();
+  }
   try {
     return await apiFn();
   } catch (err) {
@@ -462,7 +502,7 @@ export async function fetchAuthenticatedProfile(explicitToken?: string): Promise
   profile: UserProfile;
   privateInfo: UserPrivateInfo;
 }> {
-  return withBackendFallback(
+  const result = await withBackendFallback(
     () =>
       apiJson<{ profile: UserProfile; privateInfo: UserPrivateInfo }>(
         '/api/auth/me',
@@ -471,6 +511,15 @@ export async function fetchAuthenticatedProfile(explicitToken?: string): Promise
       ),
     () => ensureProfileViaSupabase(explicitToken),
   );
+
+  const overrideRole = readPortalRoleOverride(result.profile.uid);
+  if (overrideRole && result.profile.accountType !== overrideRole) {
+    return {
+      profile: { ...result.profile, accountType: overrideRole },
+      privateInfo: result.privateInfo,
+    };
+  }
+  return result;
 }
 
 export async function switchUserAccountRole(
@@ -478,11 +527,29 @@ export async function switchUserAccountRole(
 ): Promise<{ profile: UserProfile; privateInfo: UserPrivateInfo }> {
   const nextRole: AccountType = accountType === 'host' ? 'host' : 'traveller';
   const data = await withBackendFallback(
-    () =>
-      apiJson<{ profile: UserProfile; privateInfo: UserPrivateInfo }>('/api/auth/role', {
+    async () => {
+      const serverRes = await apiJson<{
+        profile: UserProfile;
+        privateInfo: UserPrivateInfo;
+        rolePersistedInDb?: boolean;
+      }>('/api/auth/role', {
         method: 'PATCH',
         body: JSON.stringify({ accountType: nextRole }),
-      }),
+      });
+
+      if (serverRes.rolePersistedInDb === false) {
+        writePortalRoleOverride(serverRes.profile.uid, nextRole);
+        const supabase = await getSupabaseClient().catch(() => null);
+        await supabase?.auth.updateUser({ data: { account_type: nextRole } }).catch(() => undefined);
+      } else {
+        writePortalRoleOverride(serverRes.profile.uid, null);
+      }
+
+      return {
+        profile: { ...serverRes.profile, accountType: nextRole },
+        privateInfo: serverRes.privateInfo,
+      };
+    },
     async () => {
       const supabase = await getSupabaseClient();
       const ensured = await ensureProfileViaSupabase();
@@ -506,8 +573,13 @@ export async function switchUserAccountRole(
         .updateUser({ data: { account_type: nextRole } })
         .catch(() => undefined);
 
-      if (error) {
-        console.warn('Role switch DB warning (using session metadata):', error.message);
+      if (error || !updated) {
+        if (error) {
+          console.warn('Role switch DB warning (using persisted override):', error.message);
+        }
+        writePortalRoleOverride(ensured.profile.uid, nextRole);
+      } else {
+        writePortalRoleOverride(ensured.profile.uid, null);
       }
 
       return {
@@ -799,26 +871,38 @@ export async function getListingPaymentDestination(
 
       if (!listingRow) return null;
       const hostId = String((listingRow as Record<string, unknown>).host_id);
+      const hostName = String((listingRow as Record<string, unknown>).host_name || 'Tourx Host');
+      const fallbackQr = getListingQrLocal(listingId) || getHostQrLocal(hostId);
+
       const { data: privRow } = await supabase
         .from('user_private_info')
         .select('*')
         .eq('uid', hostId)
         .maybeSingle();
 
-      if (!privRow) return null;
+      if (!privRow) {
+        if (!fallbackQr) return null;
+        return {
+          listingId,
+          hostId,
+          payeeName: hostName,
+          paymentPhone: '',
+          upiId: '',
+          preferredApp: 'both',
+          paymentQrUrl: fallbackQr,
+        };
+      }
       const priv = privRow as Record<string, unknown>;
       const app = priv.preferred_payment_app;
       return {
         listingId,
         hostId,
-        payeeName: String(priv.payee_name || (listingRow as Record<string, unknown>).host_name || 'Tourx Host'),
+        payeeName: String(priv.payee_name || hostName),
         paymentPhone: String(priv.phone || ''),
         upiId: String(priv.payout_upi_id || ''),
         preferredApp: app === 'phonepe' || app === 'gpay' ? app : 'both',
         paymentQrUrl:
-          (typeof priv.payment_qr_url === 'string' ? priv.payment_qr_url : '') ||
-          getListingQrLocal(listingId) ||
-          getHostQrLocal(hostId),
+          (typeof priv.payment_qr_url === 'string' ? priv.payment_qr_url : '') || fallbackQr,
       };
     },
   );

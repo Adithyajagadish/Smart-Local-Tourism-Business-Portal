@@ -58,6 +58,8 @@ interface HostStudioViewProps {
   availabilitySlots: AvailabilitySlot[];
   currency: CurrencyCode;
   onOpenHostAuth: () => void;
+  onSwitchToHost?: () => Promise<void>;
+  onSignOut?: () => void;
   onSavePayoutSettings: (input: HostPayoutSettingsInput) => Promise<void>;
   onCreateListing: (input: {
     category: ListingCategory;
@@ -130,6 +132,8 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
   availabilitySlots,
   currency,
   onOpenHostAuth,
+  onSwitchToHost,
+  onSignOut,
   onSavePayoutSettings,
   onCreateListing,
   onUpdateListing,
@@ -137,6 +141,8 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
   onDeleteListing,
   onUpdateBookingStatus,
 }) => {
+  const [switchingToHost, setSwitchingToHost] = useState(false);
+  const [switchHostError, setSwitchHostError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<HostTab>('overview');
   const [editingListingId, setEditingListingId] = useState<string | null>(null);
   const [form, setForm] = useState(DEFAULT_FORM);
@@ -259,6 +265,26 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
 
   // Strict Owner-Only Gate
   if (!userProfile || userProfile.accountType !== 'host') {
+    const handleDirectSwitch = async () => {
+      if (!userProfile || !onSwitchToHost) {
+        onOpenHostAuth();
+        return;
+      }
+      setSwitchHostError(null);
+      setSwitchingToHost(true);
+      try {
+        await onSwitchToHost();
+      } catch (err) {
+        setSwitchHostError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to switch to Host Studio right now. Please try again.',
+        );
+      } finally {
+        setSwitchingToHost(false);
+      }
+    };
+
     return (
       <div className="max-w-2xl mx-auto my-20 px-4">
         <div className="p-8 sm:p-10 rounded-2xl border border-slate-200 bg-white text-center space-y-4">
@@ -268,16 +294,38 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
           <h1 className="text-2xl font-bold text-slate-900">Owner-Only Host Studio</h1>
           <p className="text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
             {userProfile
-              ? `You are currently signed in as a Traveller (${userProfile.displayName}). Switch to a Host account to upload property listings, configure your receiving payment number, manage bookings, and track rental earnings.`
+              ? `You are currently signed in as a Traveller (${userProfile.displayName}). Switch to Host & Owner mode to upload property listings, configure your receiving payment QR or number, manage bookings, and track rental earnings.`
               : 'Only registered property owners, local guides, and cultural business hosts can upload listings, configure receiving UPI numbers, manage availability calendars, and track earnings.'}
           </p>
-          <button
-            type="button"
-            onClick={onOpenHostAuth}
-            className="px-6 py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700 transition-colors"
-          >
-            Sign in as Host
-          </button>
+          {switchHostError && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 max-w-md mx-auto">
+              {switchHostError}
+            </div>
+          )}
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-1">
+            <button
+              type="button"
+              disabled={switchingToHost}
+              onClick={() => void handleDirectSwitch()}
+              className="px-6 py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700 disabled:opacity-60 transition-colors"
+            >
+              {switchingToHost
+                ? 'Switching to Host Studio...'
+                : userProfile
+                  ? 'Switch to Host Studio'
+                  : 'Sign in as Host'}
+            </button>
+            {userProfile && onSignOut && (
+              <button
+                type="button"
+                disabled={switchingToHost}
+                onClick={onSignOut}
+                className="px-4 py-2.5 rounded-lg border border-slate-200 text-slate-700 text-sm font-semibold hover:bg-slate-50 transition-colors"
+              >
+                Use another account
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );

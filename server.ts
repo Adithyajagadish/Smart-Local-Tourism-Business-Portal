@@ -848,20 +848,44 @@ async function startServer() {
     const { accountType } = req.body as { accountType?: AccountType };
     const nextRole: AccountType = accountType === 'host' ? 'host' : 'traveller';
 
+    const meta = (req.authUser.user_metadata || {}) as {
+      display_name?: string;
+      full_name?: string;
+      name?: string;
+      avatar_url?: string;
+    };
+    const fallbackName =
+      clampString(meta.display_name || meta.full_name || meta.name, 80) ||
+      req.authUser.email?.split('@')[0] ||
+      'Tourx Member';
+
     try {
-      await ensureUserProfile(req.dbClient, req.authUser, Boolean(req.isAdminClient));
+      const ensured = await ensureUserProfile(
+        req.dbClient,
+        req.authUser,
+        Boolean(req.isAdminClient),
+      );
       const { data: updatedRow, error } = await req.dbClient
         .from('user_profiles')
-        .update({
-          account_type: nextRole,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('uid', req.authUser.id)
+        .upsert(
+          {
+            uid: req.authUser.id,
+            display_name: ensured.profile.displayName || fallbackName,
+            account_type: nextRole,
+            avatar_url: ensured.profile.avatarUrl || clampString(meta.avatar_url, 500),
+            bio: ensured.profile.bio || '',
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'uid' },
+        )
         .select('*')
         .maybeSingle();
 
-      if (error) {
+      if (error && req.isAdminClient) {
         throw new Error(error.message);
+      }
+      if (error) {
+        console.warn('[Auth] Role DB update limited by RLS; using fallback state:', error.message);
       }
 
       const { data: privateRow } = await req.dbClient
@@ -870,27 +894,20 @@ async function startServer() {
         .eq('uid', req.authUser.id)
         .maybeSingle();
 
-      const fallbackName =
-        clampString(
-          (req.authUser.user_metadata as { display_name?: string } | undefined)?.display_name,
-          80,
-        ) ||
-        req.authUser.email?.split('@')[0] ||
-        'Tourx Member';
+      const rolePersistedInDb = Boolean(!error && updatedRow);
 
       res.json({
-        profile: updatedRow
-          ? mapUserProfile(updatedRow as Record<string, unknown>)
-          : {
-              uid: req.authUser.id,
-              displayName: fallbackName,
-              accountType: nextRole,
-              avatarUrl: '',
-              bio: '',
-            },
+        profile:
+          updatedRow && !error
+            ? mapUserProfile(updatedRow as Record<string, unknown>)
+            : {
+                ...ensured.profile,
+                accountType: nextRole,
+              },
         privateInfo: privateRow
           ? mapUserPrivateInfo(privateRow as Record<string, unknown>)
-          : { email: req.authUser.email || '' },
+          : ensured.privateInfo,
+        rolePersistedInDb,
       });
     } catch (err) {
       console.warn('[Auth] Failed switching role:', err instanceof Error ? err.message : err);
@@ -1128,7 +1145,7 @@ async function startServer() {
         const fallbackQr =
           getListingQrFallback(req.params.listingId) || (hostId ? getHostQrFallback(hostId) : '');
 
-        if (req.isAdminClient && hostId) {
+        if (hostId && (req.isAdminClient || hostId === req.authUser?.id)) {
           const { data: privateRow } = await req.dbClient
             .from('user_private_info')
             .select('*')

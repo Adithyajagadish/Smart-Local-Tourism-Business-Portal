@@ -20,7 +20,7 @@ import type { AccountType } from '../types';
 interface AuthGateViewProps {
   supabaseConfigured: boolean;
   configError?: string;
-  onAuthenticated: (accessToken?: string) => Promise<void>;
+  onAuthenticated: (accessToken?: string, preferredRole?: AccountType) => Promise<void>;
 }
 
 export const AuthGateView: React.FC<AuthGateViewProps> = ({
@@ -74,9 +74,14 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
 
     setSubmitting(true);
     try {
+      try {
+        window.sessionStorage.setItem('tourx_pending_portal_role', accountType);
+      } catch {
+        // Ignore sessionStorage errors
+      }
       if (mode === 'signin') {
         const session = await signInWithSupabaseEmail({ email: cleanedEmail, password });
-        await onAuthenticated(session.access_token);
+        await onAuthenticated(session.access_token, accountType);
       } else {
         const result = await signUpWithSupabaseEmail({
           displayName: displayName.trim(),
@@ -92,7 +97,7 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
           setMode('signin');
           setPassword('');
         } else {
-          await onAuthenticated(result.session?.access_token);
+          await onAuthenticated(result.session?.access_token, accountType);
         }
       }
     } catch (err) {
@@ -298,42 +303,40 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
               </div>
             </div>
 
-            {mode === 'signup' && (
-              <div>
-                <span className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  Start Using Tourx As
-                </span>
-                <div className="grid grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setAccountType('traveller')}
-                    className={`p-3 rounded-xl border text-left transition-colors ${
-                      accountType === 'traveller'
-                        ? 'border-teal-600 bg-teal-50/70 text-slate-900'
-                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                    }`}
-                  >
-                    <Compass className="w-4 h-4 text-teal-700 mb-1.5" />
-                    <p className="text-xs font-bold text-slate-900">Traveller</p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">Book stays &amp; guides</p>
-                  </button>
+            <div>
+              <span className="block text-xs font-semibold text-slate-700 mb-1.5">
+                {mode === 'signin' ? 'Sign In Into Portal' : 'Start Using Tourx As'}
+              </span>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setAccountType('traveller')}
+                  className={`p-3 rounded-xl border text-left transition-colors ${
+                    accountType === 'traveller'
+                      ? 'border-teal-600 bg-teal-50/70 text-slate-900'
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                  }`}
+                >
+                  <Compass className="w-4 h-4 text-teal-700 mb-1.5" />
+                  <p className="text-xs font-bold text-slate-900">Traveller</p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Book stays &amp; guides</p>
+                </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setAccountType('host')}
-                    className={`p-3 rounded-xl border text-left transition-colors ${
-                      accountType === 'host'
-                        ? 'border-teal-600 bg-teal-50/70 text-slate-900'
-                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                    }`}
-                  >
-                    <Building2 className="w-4 h-4 text-teal-700 mb-1.5" />
-                    <p className="text-xs font-bold text-slate-900">Host &amp; Owner</p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">List &amp; earn via UPI</p>
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setAccountType('host')}
+                  className={`p-3 rounded-xl border text-left transition-colors ${
+                    accountType === 'host'
+                      ? 'border-teal-600 bg-teal-50/70 text-slate-900'
+                      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                  }`}
+                >
+                  <Building2 className="w-4 h-4 text-teal-700 mb-1.5" />
+                  <p className="text-xs font-bold text-slate-900">Host &amp; Owner</p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">List &amp; earn via UPI</p>
+                </button>
               </div>
-            )}
+            </div>
 
             <button
               type="submit"

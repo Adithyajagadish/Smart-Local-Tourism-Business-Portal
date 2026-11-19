@@ -442,7 +442,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
         const contentType = res.headers.get('content-type') || '';
         if (!contentType.includes('application/json')) {
           throw new Error(
-            'Voice backend is unreachable on this deployment. Start the app with `npm run start` so `/api/*` routes are active.',
+            'Voice backend is unreachable on static-only hosting. Use the full-stack server deployment for Live Voice.',
           );
         }
 
@@ -511,7 +511,7 @@ export const LiveVoiceModal: React.FC<LiveVoiceModalProps> = ({
           reachable: false,
           configured: false,
           message:
-            'Tourx backend (/api/live) is unreachable on this deployment. Deploy with the Node server (`npm run start`), not static-only hosting.',
+            'Live Voice requires the Tourx backend server with Gemini API enabled. It is unavailable on static-only hosting.',
         };
       }
       const data = (await res.json()) as {
