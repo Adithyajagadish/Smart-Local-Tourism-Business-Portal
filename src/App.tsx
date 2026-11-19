@@ -114,7 +114,7 @@ function TourxAppInner() {
         const initState = await getSupabaseInitState();
         if (!active) return;
 
-        setSupabaseConfigured(initState.configured && initState.serverConfigured);
+        setSupabaseConfigured(initState.configured);
         setSupabaseConfigError(initState.errorMessage);
 
         if (!initState.client) {

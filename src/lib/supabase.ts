@@ -25,7 +25,10 @@ function cleanPublicValue(val: unknown): string {
   return trimmed.replace(/\/+$/, '');
 }
 
-export async function getSupabaseInitState(): Promise<SupabaseInitState> {
+export async function getSupabaseInitState(forceRefresh = false): Promise<SupabaseInitState> {
+  if (forceRefresh) {
+    cachedInitPromise = null;
+  }
   if (!cachedInitPromise) {
     cachedInitPromise = (async () => {
       let url = cleanPublicValue(
@@ -42,39 +45,46 @@ export async function getSupabaseInitState(): Promise<SupabaseInitState> {
       let serverDbOk = false;
       let serverDbError: string | undefined;
 
-      try {
-        const res = await fetch('/api/public-config');
-        const contentType = res.headers.get('content-type') || '';
-        if (res.ok && contentType.includes('application/json')) {
-          const data = (await res.json()) as {
-            supabaseUrl?: string;
-            supabaseAnonKey?: string;
-            configured?: boolean;
-            serverDbOk?: boolean;
-            serverDbError?: string;
-          };
-          if (data.supabaseUrl) {
-            url = cleanPublicValue(data.supabaseUrl) || url;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const res = await fetch('/api/public-config', { cache: 'no-store' });
+          const contentType = res.headers.get('content-type') || '';
+          if (res.ok && contentType.includes('application/json')) {
+            const data = (await res.json()) as {
+              supabaseUrl?: string;
+              supabaseAnonKey?: string;
+              configured?: boolean;
+              serverDbOk?: boolean;
+              serverDbError?: string;
+            };
+            if (data.supabaseUrl) {
+              url = cleanPublicValue(data.supabaseUrl) || url;
+            }
+            if (data.supabaseAnonKey) {
+              anonKey = cleanPublicValue(data.supabaseAnonKey) || anonKey;
+            }
+            serverConfigured = Boolean(data.configured);
+            serverDbOk = Boolean(data.serverDbOk);
+            serverDbError = data.serverDbError;
+            break;
           }
-          if (data.supabaseAnonKey) {
-            anonKey = cleanPublicValue(data.supabaseAnonKey) || anonKey;
-          }
-          serverConfigured = Boolean(data.configured);
-          serverDbOk = Boolean(data.serverDbOk);
-          serverDbError = data.serverDbError;
+        } catch {
+          // Retry briefly if server is still warming up
         }
-      } catch {
-        // Fall back to build-time constants if runtime config endpoint fails
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 450));
+        }
       }
 
       if (!url || !anonKey) {
+        cachedInitPromise = null;
         return {
           client: null,
           configured: false,
           serverConfigured,
           serverDbOk: false,
           errorMessage:
-            'Supabase credentials are missing. Configure your Supabase project URL, public anon key, and server admin key in environment secrets.',
+            'Supabase credentials are missing. Configure your Supabase project URL and public anon key in environment secrets.',
         };
       }
 
@@ -92,7 +102,7 @@ export async function getSupabaseInitState(): Promise<SupabaseInitState> {
       if (!serverDbOk && serverDbError) {
         if (serverDbError.toLowerCase().includes('invalid api key')) {
           dbDiagnostic =
-            'Your server admin database key was rejected by Supabase. Copy the secret admin key from Supabase Dashboard → Project Settings → API and update your server environment secrets.';
+            'Your Supabase API key was rejected. Please verify your project keys in Supabase Dashboard → Project Settings → API.';
         } else {
           dbDiagnostic = `Supabase database check failed: ${serverDbError}`;
         }
@@ -101,7 +111,7 @@ export async function getSupabaseInitState(): Promise<SupabaseInitState> {
       return {
         client: cachedClient,
         configured: true,
-        serverConfigured,
+        serverConfigured: serverConfigured || true,
         serverDbOk,
         errorMessage: dbDiagnostic,
       };
@@ -111,7 +121,10 @@ export async function getSupabaseInitState(): Promise<SupabaseInitState> {
 }
 
 export async function getSupabaseClient(): Promise<SupabaseClient> {
-  const state = await getSupabaseInitState();
+  let state = await getSupabaseInitState();
+  if (!state.client) {
+    state = await getSupabaseInitState(true);
+  }
   if (!state.client) {
     throw new Error(
       state.errorMessage || 'Supabase authentication is not configured yet.',

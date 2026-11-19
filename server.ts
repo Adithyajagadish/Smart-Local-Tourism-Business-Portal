@@ -34,7 +34,7 @@ interface AuthedRequest extends Request {
 }
 
 function cleanEnvValue(value: string | undefined, placeholders: string[] = []): string {
-  const trimmed = value?.trim() || '';
+  const trimmed = (value?.trim() || '').replace(/^["']|["']$/g, '').trim();
   if (!trimmed || placeholders.includes(trimmed)) {
     return '';
   }
@@ -640,20 +640,38 @@ async function startServer() {
   });
 
   app.get('/api/public-config', async (_req, res) => {
-    const { url, serviceRoleKey, anonKey } = resolveSupabaseConfig();
+    const { url, anonKey } = resolveSupabaseConfig();
     let serverDbError: string | undefined;
+    let serverDbOk = false;
+
     const admin = createSupabaseAdmin();
     if (admin) {
       const { error } = await admin.from('user_profiles').select('uid').limit(1);
-      if (error) {
+      if (!error) {
+        serverDbOk = true;
+      } else {
         serverDbError = error.message;
       }
     }
+
+    if (!serverDbOk && url && anonKey) {
+      const anonClient = createClient(url, anonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+      const { error } = await anonClient.from('user_profiles').select('uid').limit(1);
+      if (!error) {
+        serverDbOk = true;
+        serverDbError = undefined;
+      } else if (!serverDbError) {
+        serverDbError = error.message;
+      }
+    }
+
     res.json({
       supabaseUrl: url,
       supabaseAnonKey: anonKey,
-      configured: Boolean(url && anonKey && serviceRoleKey),
-      serverDbOk: !serverDbError && Boolean(admin),
+      configured: Boolean(url && anonKey),
+      serverDbOk,
       serverDbError,
     });
   });

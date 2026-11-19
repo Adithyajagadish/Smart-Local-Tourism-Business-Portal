@@ -10,7 +10,11 @@ import {
   Mail,
   User,
 } from 'lucide-react';
-import { signInWithSupabaseEmail, signUpWithSupabaseEmail } from '../lib/supabase';
+import {
+  getSupabaseInitState,
+  signInWithSupabaseEmail,
+  signUpWithSupabaseEmail,
+} from '../lib/supabase';
 import type { AccountType } from '../types';
 
 interface AuthGateViewProps {
@@ -41,11 +45,15 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
     setInfoMsg(null);
 
     if (!supabaseConfigured) {
-      setErrorMsg(
-        configError ||
-          'Supabase environment variables are missing. Configure your Supabase project URL, public anon key, and server admin key in environment secrets.',
-      );
-      return;
+      const refreshed = await getSupabaseInitState(true).catch(() => null);
+      if (!refreshed?.configured) {
+        setErrorMsg(
+          refreshed?.errorMessage ||
+            configError ||
+            'Supabase environment variables are missing. Configure your Supabase project URL and public anon key in environment secrets.',
+        );
+        return;
+      }
     }
 
     const cleanedEmail = email.trim();
@@ -135,7 +143,7 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
       </div>
 
       {/* Right Authentication Card */}
-      <div className="flex-1 bg-slate-50 text-slate-900 flex items-center justify-center p-6 sm:p-10">
+      <div className="flex-1 bg-slate-50 text-slate-900 flex items-center justify-center p-6 sm:p-10 pb-24 sm:pb-20">
         <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xl p-6 sm:p-8">
           <div className="flex rounded-xl bg-slate-100 p-1 mb-6">
             <button
