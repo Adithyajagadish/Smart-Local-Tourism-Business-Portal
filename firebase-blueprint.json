@@ -1,0 +1,225 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public-safe user profile and portal track for Tourx members",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "accountType": { "type": "string", "enum": ["traveller", "host"] },
+        "avatarUrl": { "type": "string", "maxLength": 500 },
+        "bio": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "accountType", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated PII contact and payout details strictly accessible by the user",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "payoutUpiId": { "type": "string", "maxLength": 80 },
+        "payeeName": { "type": "string", "maxLength": 80 },
+        "preferredPaymentApp": { "type": "string", "enum": ["phonepe", "gpay", "both"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "updatedAt"]
+    },
+    "Listing": {
+      "title": "Listing",
+      "description": "Homestay, local guide, or cultural business listing published by a Host owner",
+      "type": "object",
+      "properties": {
+        "hostId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "category": { "type": "string", "enum": ["homestay", "guide", "cultural"] },
+        "title": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 10, "maxLength": 1500 },
+        "locationName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "country": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "pricePerUnitInr": { "type": "number" },
+        "unitLabel": { "type": "string", "enum": ["night", "session", "person"] },
+        "maxGuests": { "type": "number" },
+        "amenities": { "type": "array", "description": "Up to 12 amenity tags" },
+        "photos": { "type": "array", "description": "Up to 6 image paths or compressed data URLs" },
+        "blockedDates": { "type": "array", "description": "Up to 120 ISO YYYY-MM-DD blocked dates" },
+        "isPublished": { "type": "boolean" },
+        "rating": { "type": "number" },
+        "reviewCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "hostId",
+        "hostName",
+        "category",
+        "title",
+        "description",
+        "locationName",
+        "country",
+        "lat",
+        "lng",
+        "pricePerUnitInr",
+        "unitLabel",
+        "maxGuests",
+        "amenities",
+        "photos",
+        "blockedDates",
+        "isPublished",
+        "rating",
+        "reviewCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ListingPaymentDestination": {
+      "title": "ListingPaymentDestination",
+      "description": "Host receiving phone number and UPI ID for a listing, readable only by signed-in travellers during checkout",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "payeeName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "paymentPhone": { "type": "string", "minLength": 7, "maxLength": 32 },
+        "upiId": { "type": "string", "minLength": 3, "maxLength": 80 },
+        "preferredApp": { "type": "string", "enum": ["phonepe", "gpay", "both"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "listingId",
+        "hostId",
+        "payeeName",
+        "paymentPhone",
+        "upiId",
+        "preferredApp",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Paid reservation created by a Traveller and managed by the Host owner",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "listingTitle": { "type": "string", "maxLength": 120 },
+        "listingLocation": { "type": "string", "maxLength": 120 },
+        "listingCategory": { "type": "string", "enum": ["homestay", "guide", "cultural"] },
+        "listingPhoto": { "type": "string", "maxLength": 220000 },
+        "hostId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostName": { "type": "string", "maxLength": 80 },
+        "hostPayeeName": { "type": "string", "maxLength": 80 },
+        "hostPaymentPhone": { "type": "string", "maxLength": 32 },
+        "hostUpiId": { "type": "string", "maxLength": 80 },
+        "travellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "travellerName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "checkInDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "maxLength": 10 },
+        "checkOutDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "maxLength": 10 },
+        "nightsOrUnits": { "type": "number" },
+        "guests": { "type": "number" },
+        "subtotalInr": { "type": "number" },
+        "serviceFeeInr": { "type": "number" },
+        "totalAmountInr": { "type": "number" },
+        "hostNetPayoutInr": { "type": "number" },
+        "displayCurrency": { "type": "string", "enum": ["INR", "USD", "EUR"] },
+        "paymentMethod": { "type": "string", "enum": ["phonepe", "gpay"] },
+        "paymentMode": { "type": "string", "enum": ["live_upi", "simulated"] },
+        "upiHandle": { "type": "string", "maxLength": 80 },
+        "transactionRef": { "type": "string", "maxLength": 64 },
+        "paymentStatus": { "type": "string", "enum": ["paid"] },
+        "bookingStatus": { "type": "string", "enum": ["confirmed", "completed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "listingId",
+        "listingTitle",
+        "listingLocation",
+        "listingCategory",
+        "listingPhoto",
+        "hostId",
+        "hostName",
+        "hostPayeeName",
+        "hostPaymentPhone",
+        "hostUpiId",
+        "travellerId",
+        "travellerName",
+        "checkInDate",
+        "checkOutDate",
+        "nightsOrUnits",
+        "guests",
+        "subtotalInr",
+        "serviceFeeInr",
+        "totalAmountInr",
+        "hostNetPayoutInr",
+        "displayCurrency",
+        "paymentMethod",
+        "paymentMode",
+        "upiHandle",
+        "transactionRef",
+        "paymentStatus",
+        "bookingStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ListingAvailabilitySlot": {
+      "title": "ListingAvailabilitySlot",
+      "description": "PII-free public calendar slot linked to a booking for date conflict checks",
+      "type": "object",
+      "properties": {
+        "listingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "travellerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "checkInDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "maxLength": 10 },
+        "checkOutDate": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "maxLength": 10 },
+        "status": { "type": "string", "enum": ["active", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "listingId",
+        "hostId",
+        "travellerId",
+        "checkInDate",
+        "checkOutDate",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "UserProfile" },
+      "description": "Member profile with selected Traveller or Host portal track"
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "UserPrivateInfo" },
+      "description": "Private PII contact and UPI payout info strictly isolated to the owner"
+    },
+    "/listings/{listingId}": {
+      "schema": { "$ref": "Listing" },
+      "description": "Homestay, local guide, and cultural business listings"
+    },
+    "/listing_payment_destinations/{listingId}": {
+      "schema": { "$ref": "ListingPaymentDestination" },
+      "description": "Host UPI ID and receiving number per listing, readable only by signed-in travellers via single-doc get"
+    },
+    "/bookings/{bookingId}": {
+      "schema": { "$ref": "Booking" },
+      "description": "Paid bookings accessible strictly by the booking Traveller or owning Host"
+    },
+    "/listing_availability/{bookingId}": {
+      "schema": { "$ref": "ListingAvailabilitySlot" },
+      "description": "Non-PII public booked date ranges synchronized atomically with bookings"
+    }
+  }
+}

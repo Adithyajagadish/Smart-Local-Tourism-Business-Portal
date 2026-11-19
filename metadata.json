@@ -1,0 +1,6 @@
+{
+  "name": "Tourx",
+  "description": "Local tourism, homestays, guides, and cultural businesses platform with Explore Anywhere world map and PhonePe & Google Pay bookings.",
+  "requestFramePermissions": ["geolocation", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
