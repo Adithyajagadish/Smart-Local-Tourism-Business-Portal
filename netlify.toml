@@ -4,4 +4,4 @@
 
 [build.environment]
   SECRETS_SCAN_OMIT_KEYS = "VITE_GOOGLE_MAPS_API_KEY,VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY,SUPABASE_URL"
-  SECRETS_SCAN_OMIT_PATHS = "firebase-applet-config.json"
+  SECRETS_SCAN_OMIT_PATHS = "firebase-applet-config.json,netlify.toml"

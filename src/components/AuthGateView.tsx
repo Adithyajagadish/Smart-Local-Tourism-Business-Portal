@@ -43,7 +43,7 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
     if (!supabaseConfigured) {
       setErrorMsg(
         configError ||
-          'Supabase environment variables are missing. Add SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, VITE_SUPABASE_URL, and VITE_SUPABASE_ANON_KEY in Settings > Secrets.',
+          'Supabase environment variables are missing. Configure your Supabase project URL, public anon key, and server admin key in environment secrets.',
       );
       return;
     }
@@ -191,7 +191,7 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
                 </p>
                 <p className="mt-0.5 text-amber-800">
                   {configError ||
-                    'Add SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, VITE_SUPABASE_URL, and VITE_SUPABASE_ANON_KEY in Settings > Secrets.'}
+                    'Configure your Supabase project URL, public anon key, and server admin key in environment secrets.'}
                 </p>
               </div>
             </div>

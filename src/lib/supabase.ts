@@ -74,7 +74,7 @@ export async function getSupabaseInitState(): Promise<SupabaseInitState> {
           serverConfigured,
           serverDbOk: false,
           errorMessage:
-            'Supabase credentials are missing. Add SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, VITE_SUPABASE_URL, and VITE_SUPABASE_ANON_KEY in Settings > Secrets.',
+            'Supabase credentials are missing. Configure your Supabase project URL, public anon key, and server admin key in environment secrets.',
         };
       }
 
@@ -92,7 +92,7 @@ export async function getSupabaseInitState(): Promise<SupabaseInitState> {
       if (!serverDbOk && serverDbError) {
         if (serverDbError.toLowerCase().includes('invalid api key')) {
           dbDiagnostic =
-            'Your SUPABASE_SERVICE_ROLE_KEY secret was rejected by Supabase (Invalid API key). Copy the service_role secret key from Supabase Dashboard → Project Settings → API and update SUPABASE_SERVICE_ROLE_KEY in Settings > Secrets.';
+            'Your server admin database key was rejected by Supabase. Copy the secret admin key from Supabase Dashboard → Project Settings → API and update your server environment secrets.';
         } else {
           dbDiagnostic = `Supabase database check failed: ${serverDbError}`;
         }
