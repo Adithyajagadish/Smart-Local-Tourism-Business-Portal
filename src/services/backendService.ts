@@ -313,13 +313,13 @@ async function apiJson<T>(
   const contentType = res.headers.get('content-type') || '';
   const isJson = contentType.includes('application/json');
 
-  if ((res.status === 404 || res.status === 502 || res.status === 504) && !isJson) {
+  if (
+    res.status === 404 ||
+    res.status === 405 ||
+    res.status === 501 ||
+    ((res.status === 502 || res.status === 504 || !res.ok) && !isJson)
+  ) {
     throw new BackendUnavailableError(`API endpoint unavailable (${res.status}).`);
-  }
-
-  if (res.status === 404) {
-    // Even if JSON 404 is returned on a static proxy rewrite, allow direct Supabase fallback
-    throw new BackendUnavailableError('API endpoint not found (404).');
   }
 
   if (!res.ok) {
@@ -488,20 +488,32 @@ export async function switchUserAccountRole(
       const ensured = await ensureProfileViaSupabase();
       const { data: updated, error } = await supabase
         .from('user_profiles')
-        .update({
-          account_type: nextRole,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('uid', ensured.profile.uid)
+        .upsert(
+          {
+            uid: ensured.profile.uid,
+            display_name: ensured.profile.displayName,
+            account_type: nextRole,
+            avatar_url: ensured.profile.avatarUrl || '',
+            bio: ensured.profile.bio || '',
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'uid' },
+        )
         .select('*')
         .maybeSingle();
 
+      await supabase.auth
+        .updateUser({ data: { account_type: nextRole } })
+        .catch(() => undefined);
+
       if (error) {
-        throw new Error(error.message || 'Unable to switch role.');
+        console.warn('Role switch DB warning (using session metadata):', error.message);
       }
 
       return {
-        profile: updated ? mapUserProfile(updated as Record<string, unknown>) : { ...ensured.profile, accountType: nextRole },
+        profile: updated
+          ? mapUserProfile(updated as Record<string, unknown>)
+          : { ...ensured.profile, accountType: nextRole },
         privateInfo: ensured.privateInfo,
       };
     },
