@@ -1122,13 +1122,11 @@ async function startServer() {
           .eq('listing_id', req.params.listingId)
           .maybeSingle();
 
-        if (error && !req.isAdminClient) {
-          res.json(null);
-          return;
+        if (error && req.isAdminClient) {
+          throw new Error(error.message);
         }
-        if (error) throw new Error(error.message);
 
-        if (data) {
+        if (data && !error) {
           res.json(mapListingPaymentDestination(data as Record<string, unknown>));
           return;
         }

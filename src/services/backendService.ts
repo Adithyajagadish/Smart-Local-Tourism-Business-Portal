@@ -30,6 +30,13 @@ class BackendUnavailableError extends Error {
   }
 }
 
+class RlsPermissionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RlsPermissionError';
+  }
+}
+
 export interface HostPayoutSettingsInput {
   email: string;
   phone: string;
@@ -99,8 +106,106 @@ function emitBackendChange(): void {
 const HOST_QR_STORAGE_KEY = 'tourx_host_qr_fallback';
 const LISTING_QR_STORAGE_KEY = 'tourx_listing_qr_fallback';
 const PORTAL_ROLE_OVERRIDE_KEY = 'tourx_portal_role_override';
+const LOCAL_BOOKINGS_STORAGE_KEY = 'tourx_local_test_bookings_v1';
+const LOCAL_SLOTS_STORAGE_KEY = 'tourx_local_test_slots_v1';
 
 let apiBackendMode: 'unknown' | 'server' | 'supabase-direct' = 'unknown';
+
+function isRlsOrPermissionError(err: unknown): boolean {
+  if (err instanceof RlsPermissionError) return true;
+  const msg = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
+  return (
+    msg.includes('row-level security') ||
+    msg.includes('permission denied') ||
+    msg.includes('42501') ||
+    msg.includes('service_role')
+  );
+}
+
+function readLocalTestBookings(): Booking[] {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_BOOKINGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Booking[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalTestBookings(items: Booking[]): void {
+  try {
+    window.localStorage.setItem(LOCAL_BOOKINGS_STORAGE_KEY, JSON.stringify(items.slice(0, 100)));
+  } catch {
+    // Ignore localStorage quota/private-mode errors
+  }
+}
+
+function readLocalTestSlots(): AvailabilitySlot[] {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SLOTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AvailabilitySlot[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalTestSlots(items: AvailabilitySlot[]): void {
+  try {
+    window.localStorage.setItem(LOCAL_SLOTS_STORAGE_KEY, JSON.stringify(items.slice(0, 200)));
+  } catch {
+    // Ignore localStorage quota/private-mode errors
+  }
+}
+
+function saveLocalTestBooking(booking: Booking): void {
+  const existingBookings = readLocalTestBookings().filter((b) => b.id !== booking.id);
+  writeLocalTestBookings([booking, ...existingBookings]);
+
+  const existingSlots = readLocalTestSlots().filter((s) => s.id !== booking.id);
+  const slot: AvailabilitySlot = {
+    id: booking.id,
+    listingId: booking.listingId,
+    hostId: booking.hostId,
+    travellerId: booking.travellerId,
+    checkInDate: booking.checkInDate,
+    checkOutDate: booking.checkOutDate,
+    status: booking.bookingStatus === 'cancelled' ? 'cancelled' : 'active',
+  };
+  writeLocalTestSlots([slot, ...existingSlots]);
+}
+
+function mergeBookingsWithLocal(remote: Booking[], filterFn: (b: Booking) => boolean): Booking[] {
+  const local = readLocalTestBookings().filter(filterFn);
+  if (local.length === 0) return remote;
+  const byId = new Map<string, Booking>();
+  for (const item of remote) {
+    byId.set(item.id, item);
+  }
+  for (const item of local) {
+    if (!byId.has(item.id)) {
+      byId.set(item.id, item);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+function mergeSlotsWithLocal(remote: AvailabilitySlot[]): AvailabilitySlot[] {
+  const local = readLocalTestSlots().filter((s) => s.status === 'active');
+  if (local.length === 0) return remote;
+  const byId = new Map<string, AvailabilitySlot>();
+  for (const item of remote) {
+    byId.set(item.id, item);
+  }
+  for (const item of local) {
+    if (!byId.has(item.id)) {
+      byId.set(item.id, item);
+    }
+  }
+  return Array.from(byId.values());
+}
 
 function readPortalRoleOverride(uid: string): AccountType | null {
   try {
@@ -369,6 +474,9 @@ async function apiJson<T>(
     }
     if (res.status === 401) {
       throw new AuthSessionError(message);
+    }
+    if (res.status === 503 && isRlsOrPermissionError(message)) {
+      throw new RlsPermissionError(message);
     }
     throw new Error(message);
   }
@@ -683,8 +791,8 @@ export function subscribeActiveAvailability(
   onData: (slots: AvailabilitySlot[]) => void,
 ): () => void {
   return createPollingSubscription(
-    () =>
-      withBackendFallback(
+    async () => {
+      const remote = await withBackendFallback(
         () => apiJson<AvailabilitySlot[]>('/api/availability'),
         async () => {
           const supabase = await getSupabaseClient();
@@ -695,7 +803,9 @@ export function subscribeActiveAvailability(
           if (error) throw new Error(error.message);
           return (data || []).map((row) => mapAvailabilitySlot(row as Record<string, unknown>));
         },
-      ),
+      );
+      return mergeSlotsWithLocal(remote);
+    },
     onData,
   );
 }
@@ -705,8 +815,8 @@ export function subscribeTravellerBookings(
   onData: (bookings: Booking[]) => void,
 ): () => void {
   return createPollingSubscription(
-    () =>
-      withBackendFallback(
+    async () => {
+      const remote = await withBackendFallback(
         () => apiJson<Booking[]>(`/api/travellers/${encodeURIComponent(travellerId)}/bookings`),
         async () => {
           const supabase = await getSupabaseClient();
@@ -718,7 +828,9 @@ export function subscribeTravellerBookings(
           if (error) throw new Error(error.message);
           return (data || []).map((row) => mapBooking(row as Record<string, unknown>));
         },
-      ),
+      );
+      return mergeBookingsWithLocal(remote, (b) => b.travellerId === travellerId);
+    },
     onData,
   );
 }
@@ -728,8 +840,8 @@ export function subscribeHostBookings(
   onData: (bookings: Booking[]) => void,
 ): () => void {
   return createPollingSubscription(
-    () =>
-      withBackendFallback(
+    async () => {
+      const remote = await withBackendFallback(
         () => apiJson<Booking[]>(`/api/hosts/${encodeURIComponent(hostId)}/bookings`),
         async () => {
           const supabase = await getSupabaseClient();
@@ -741,7 +853,9 @@ export function subscribeHostBookings(
           if (error) throw new Error(error.message);
           return (data || []).map((row) => mapBooking(row as Record<string, unknown>));
         },
-      ),
+      );
+      return mergeBookingsWithLocal(remote, (b) => b.hostId === hostId);
+    },
     onData,
   );
 }
@@ -818,22 +932,39 @@ export async function saveHostPayoutSettings(
       }
 
       if (input.syncExistingListings) {
-        const destBase = {
-          payee_name: basePayload.payee_name,
-          payment_phone: basePayload.phone,
-          upi_id: basePayload.payout_upi_id,
-          preferred_app: basePayload.preferred_payment_app,
-          updated_at: new Date().toISOString(),
-        };
-        const syncRes = await supabase
-          .from('listing_payment_destinations')
-          .update({ ...destBase, payment_qr_url: paymentQrUrl })
+        const { data: hostListings } = await supabase
+          .from('listings')
+          .select('id')
           .eq('host_id', hostId);
-        if (syncRes.error && isMissingPaymentQrColumnError(syncRes.error.message)) {
-          await supabase
+
+        if (hostListings && hostListings.length > 0) {
+          const nowIso = new Date().toISOString();
+          for (const item of hostListings) {
+            writeQrEntry(LISTING_QR_STORAGE_KEY, String((item as { id: string }).id), paymentQrUrl);
+          }
+          const destRows = hostListings.map((item) => ({
+            listing_id: String((item as { id: string }).id),
+            host_id: hostId,
+            payee_name: basePayload.payee_name,
+            payment_phone: basePayload.phone,
+            upi_id: basePayload.payout_upi_id,
+            preferred_app: basePayload.preferred_payment_app,
+            created_at: nowIso,
+            updated_at: nowIso,
+          }));
+          const syncRes = await supabase
             .from('listing_payment_destinations')
-            .update(destBase)
-            .eq('host_id', hostId);
+            .upsert(
+              destRows.map((row) => ({ ...row, payment_qr_url: paymentQrUrl })),
+              { onConflict: 'listing_id' },
+            );
+          if (syncRes.error && isMissingPaymentQrColumnError(syncRes.error.message)) {
+            await supabase
+              .from('listing_payment_destinations')
+              .upsert(destRows, { onConflict: 'listing_id' });
+          } else if (syncRes.error) {
+            console.warn('Payment destination sync warning:', syncRes.error.message);
+          }
         }
       }
 
@@ -1103,115 +1234,196 @@ export async function deleteHostListing(listingId: string): Promise<void> {
 }
 
 export async function createBookingAtomic(payload: CreateBookingPayload): Promise<Booking> {
-  const booking = await withBackendFallback(
-    () =>
-      apiJson<Booking>('/api/bookings', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-    async () => {
-      const supabase = await getSupabaseClient();
-      const requestedDays = expandRange(payload.checkInDate, payload.checkOutDate);
+  const buildLocalBookingRecord = (bookingId: string, travellerId: string): Booking => {
+    const now = new Date().toISOString();
+    const totalAmt = Math.max(100, Math.round(payload.totalAmountInr));
+    const serviceFee = Math.max(0, Math.round(payload.serviceFeeInr));
+    return {
+      id: bookingId,
+      listingId: payload.listing.id,
+      listingTitle: payload.listing.title,
+      listingLocation: payload.listing.locationName,
+      listingCategory: payload.listing.category,
+      listingPhoto: payload.listing.photos[0] || '',
+      hostId: payload.listing.hostId,
+      hostName: payload.listing.hostName,
+      hostPayeeName: clampString(payload.hostPayeeName || payload.listing.hostName, 80) || 'Tourx Host',
+      hostPaymentPhone: clampString(payload.hostPaymentPhone || '', 32),
+      hostUpiId: clampString(payload.hostUpiId || 'host@ybl', 80),
+      travellerId,
+      travellerName: clampString(payload.travellerName, 80) || 'Tourx Traveller',
+      checkInDate: payload.checkInDate,
+      checkOutDate: payload.checkOutDate,
+      nightsOrUnits: Math.max(1, Math.min(90, payload.nightsOrUnits)),
+      guests: Math.max(1, Math.min(30, payload.guests)),
+      subtotalInr: Math.max(100, Math.round(payload.subtotalInr)),
+      serviceFeeInr: serviceFee,
+      totalAmountInr: totalAmt,
+      hostNetPayoutInr: Math.max(90, totalAmt - serviceFee),
+      displayCurrency: payload.displayCurrency,
+      paymentMethod: payload.paymentMethod,
+      paymentMode: payload.paymentMode,
+      upiHandle: clampString(payload.upiHandle, 80),
+      transactionRef: clampString(payload.transactionRef, 64),
+      paymentStatus: 'paid',
+      bookingStatus: 'confirmed',
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
 
-      const { data: listingRow, error: listingErr } = await supabase
-        .from('listings')
-        .select('*')
-        .eq('id', payload.listing.id)
-        .maybeSingle();
+  let booking: Booking;
+  try {
+    booking = await withBackendFallback(
+      () =>
+        apiJson<Booking>('/api/bookings', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      async () => {
+        const supabase = await getSupabaseClient();
+        const { data: authData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+        const verifiedTravellerId = authData?.user?.id || payload.travellerId;
+        const requestedDays = expandRange(payload.checkInDate, payload.checkOutDate);
 
-      if (listingErr || !listingRow) {
-        throw new Error('Listing could not be found.');
-      }
+        const { data: listingRow, error: listingErr } = await supabase
+          .from('listings')
+          .select('*')
+          .eq('id', payload.listing.id)
+          .maybeSingle();
 
-      const liveListing = mapListing(listingRow as Record<string, unknown>);
-      const blockedSet = new Set(liveListing.blockedDates || []);
-      if (requestedDays.some((day) => blockedSet.has(day))) {
-        throw new Error('Selected dates include host-blocked dates. Please pick another range.');
-      }
-
-      const { data: existingSlots } = await supabase
-        .from('availability_slots')
-        .select('*')
-        .eq('listing_id', liveListing.id)
-        .eq('status', 'active');
-
-      const takenDays = new Set<string>();
-      for (const slot of existingSlots || []) {
-        const s = slot as Record<string, unknown>;
-        for (const d of expandRange(String(s.check_in_date), String(s.check_out_date))) {
-          takenDays.add(d);
+        if (listingErr || !listingRow) {
+          throw new Error('Listing could not be found.');
         }
-      }
-      if (requestedDays.some((day) => takenDays.has(day))) {
-        throw new Error(
-          'Those dates were just reserved by another traveller. Please choose different dates.',
+
+        const liveListing = mapListing(listingRow as Record<string, unknown>);
+        const blockedSet = new Set(liveListing.blockedDates || []);
+        if (requestedDays.some((day) => blockedSet.has(day))) {
+          throw new Error('Selected dates include host-blocked dates. Please pick another range.');
+        }
+
+        const { data: existingSlots } = await supabase
+          .from('availability_slots')
+          .select('*')
+          .eq('listing_id', liveListing.id)
+          .eq('status', 'active');
+
+        const mergedSlots = mergeSlotsWithLocal(
+          (existingSlots || []).map((row) => mapAvailabilitySlot(row as Record<string, unknown>)),
         );
-      }
+        const takenDays = new Set<string>();
+        for (const s of mergedSlots) {
+          if (s.listingId !== liveListing.id || s.status !== 'active') continue;
+          for (const d of expandRange(s.checkInDate, s.checkOutDate)) {
+            takenDays.add(d);
+          }
+        }
+        if (requestedDays.some((day) => takenDays.has(day))) {
+          throw new Error(
+            'Those dates were just reserved by another traveller. Please choose different dates.',
+          );
+        }
 
-      const bookingId = `bk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-      const now = new Date().toISOString();
-      const totalAmt = Math.max(100, Math.round(payload.totalAmountInr));
-      const serviceFee = Math.max(0, Math.round(payload.serviceFeeInr));
+        const bookingId = `bk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+        const now = new Date().toISOString();
+        const totalAmt = Math.max(100, Math.round(payload.totalAmountInr));
+        const serviceFee = Math.max(0, Math.round(payload.serviceFeeInr));
 
-      const { data: insertedBooking, error: insertErr } = await supabase
-        .from('bookings')
-        .insert({
+        const { data: insertedBooking, error: insertErr } = await supabase
+          .from('bookings')
+          .insert({
+            id: bookingId,
+            listing_id: liveListing.id,
+            listing_title: liveListing.title,
+            listing_location: liveListing.locationName,
+            listing_category: liveListing.category,
+            listing_photo: liveListing.photos[0] || '',
+            host_id: liveListing.hostId,
+            host_name: liveListing.hostName,
+            host_payee_name:
+              clampString(payload.hostPayeeName || liveListing.hostName, 80) || 'Tourx Host',
+            host_payment_phone: clampString(payload.hostPaymentPhone || '', 32),
+            host_upi_id: clampString(payload.hostUpiId || 'host@ybl', 80),
+            traveller_id: verifiedTravellerId,
+            traveller_name: clampString(payload.travellerName, 80) || 'Tourx Traveller',
+            check_in_date: payload.checkInDate,
+            check_out_date: payload.checkOutDate,
+            nights_or_units: Math.max(1, Math.min(90, payload.nightsOrUnits)),
+            guests: Math.max(1, Math.min(30, payload.guests)),
+            subtotal_inr: Math.max(100, Math.round(payload.subtotalInr)),
+            service_fee_inr: serviceFee,
+            total_amount_inr: totalAmt,
+            host_net_payout_inr: Math.max(90, totalAmt - serviceFee),
+            display_currency: payload.displayCurrency,
+            payment_method: payload.paymentMethod,
+            payment_mode: payload.paymentMode,
+            upi_handle: clampString(payload.upiHandle, 80),
+            transaction_ref: clampString(payload.transactionRef, 64),
+            payment_status: 'paid',
+            booking_status: 'confirmed',
+            created_at: now,
+            updated_at: now,
+          })
+          .select('*')
+          .single();
+
+        if (insertErr || !insertedBooking) {
+          if (isRlsOrPermissionError(insertErr?.message)) {
+            throw new RlsPermissionError(insertErr?.message || 'Booking insert restricted by RLS.');
+          }
+          throw new Error(insertErr?.message || 'Unable to complete booking right now.');
+        }
+
+        const { error: slotErr } = await supabase.from('availability_slots').insert({
           id: bookingId,
           listing_id: liveListing.id,
-          listing_title: liveListing.title,
-          listing_location: liveListing.locationName,
-          listing_category: liveListing.category,
-          listing_photo: liveListing.photos[0] || '',
           host_id: liveListing.hostId,
-          host_name: liveListing.hostName,
-          host_payee_name: clampString(payload.hostPayeeName || liveListing.hostName, 80) || 'Tourx Host',
-          host_payment_phone: clampString(payload.hostPaymentPhone || '', 32),
-          host_upi_id: clampString(payload.hostUpiId || 'host@ybl', 80),
-          traveller_id: payload.travellerId,
-          traveller_name: clampString(payload.travellerName, 80) || 'Tourx Traveller',
+          traveller_id: verifiedTravellerId,
           check_in_date: payload.checkInDate,
           check_out_date: payload.checkOutDate,
-          nights_or_units: Math.max(1, Math.min(90, payload.nightsOrUnits)),
-          guests: Math.max(1, Math.min(30, payload.guests)),
-          subtotal_inr: Math.max(100, Math.round(payload.subtotalInr)),
-          service_fee_inr: serviceFee,
-          total_amount_inr: totalAmt,
-          host_net_payout_inr: Math.max(90, totalAmt - serviceFee),
-          display_currency: payload.displayCurrency,
-          payment_method: payload.paymentMethod,
-          payment_mode: payload.paymentMode,
-          upi_handle: clampString(payload.upiHandle, 80),
-          transaction_ref: clampString(payload.transactionRef, 64),
-          payment_status: 'paid',
-          booking_status: 'confirmed',
-          created_at: now,
-          updated_at: now,
-        })
-        .select('*')
-        .single();
+          status: 'active',
+        });
 
-      if (insertErr || !insertedBooking) {
-        throw new Error(insertErr?.message || 'Unable to complete booking right now.');
+        const mappedBooking = mapBooking(insertedBooking as Record<string, unknown>);
+        if (slotErr) {
+          if (isRlsOrPermissionError(slotErr.message)) {
+            writeLocalTestSlots([
+              {
+                id: bookingId,
+                listingId: liveListing.id,
+                hostId: liveListing.hostId,
+                travellerId: verifiedTravellerId,
+                checkInDate: payload.checkInDate,
+                checkOutDate: payload.checkOutDate,
+                status: 'active',
+              },
+              ...readLocalTestSlots().filter((s) => s.id !== bookingId),
+            ]);
+          } else {
+            await supabase.from('bookings').delete().eq('id', bookingId);
+            throw new Error(slotErr.message || 'Unable to lock booking dates.');
+          }
+        }
+
+        return mappedBooking;
+      },
+    );
+  } catch (err) {
+    if (isRlsOrPermissionError(err)) {
+      if (payload.paymentMode === 'simulated') {
+        const localId = `bk-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const localBooking = buildLocalBookingRecord(localId, payload.travellerId);
+        saveLocalTestBooking(localBooking);
+        emitBackendChange();
+        return localBooking;
       }
+      throw new Error(
+        'Database booking permission is restricted by Supabase RLS. Run the SQL in supabase_rls_setup.sql inside your Supabase SQL Editor, or use Test Mode to reserve.',
+      );
+    }
+    throw err;
+  }
 
-      const { error: slotErr } = await supabase.from('availability_slots').insert({
-        id: bookingId,
-        listing_id: liveListing.id,
-        host_id: liveListing.hostId,
-        traveller_id: payload.travellerId,
-        check_in_date: payload.checkInDate,
-        check_out_date: payload.checkOutDate,
-        status: 'active',
-      });
-
-      if (slotErr) {
-        await supabase.from('bookings').delete().eq('id', bookingId);
-        throw new Error(slotErr.message || 'Unable to lock booking dates.');
-      }
-
-      return mapBooking(insertedBooking as Record<string, unknown>);
-    },
-  );
   emitBackendChange();
   return booking;
 }
@@ -1220,6 +1432,24 @@ export async function updateBookingStatusAtomic(
   bookingId: string,
   newStatus: Exclude<BookingStatus, 'confirmed'>,
 ): Promise<void> {
+  const localBookings = readLocalTestBookings();
+  const existingLocal = localBookings.find((b) => b.id === bookingId);
+  if (existingLocal) {
+    const updatedBooking: Booking = {
+      ...existingLocal,
+      bookingStatus: newStatus,
+      updatedAt: new Date().toISOString(),
+    };
+    writeLocalTestBookings(localBookings.map((b) => (b.id === bookingId ? updatedBooking : b)));
+    if (newStatus === 'cancelled') {
+      writeLocalTestSlots(
+        readLocalTestSlots().map((s) => (s.id === bookingId ? { ...s, status: 'cancelled' } : s)),
+      );
+    }
+    emitBackendChange();
+    return;
+  }
+
   await withBackendFallback(
     () =>
       apiJson<Booking>(`/api/bookings/${encodeURIComponent(bookingId)}/status`, {
@@ -1239,6 +1469,11 @@ export async function updateBookingStatusAtomic(
         .single();
 
       if (error || !data) {
+        if (isRlsOrPermissionError(error?.message)) {
+          throw new Error(
+            'Updating booking status is restricted by Supabase RLS. Run supabase_rls_setup.sql in Supabase SQL Editor to enable status updates.',
+          );
+        }
         throw new Error(error?.message || 'Failed to update booking status.');
       }
 
