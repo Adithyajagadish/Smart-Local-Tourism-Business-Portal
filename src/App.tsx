@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { APIProvider } from '@vis.gl/react-google-maps';
 import { Compass } from 'lucide-react';
 import { AuthGateView } from './components/AuthGateView';
@@ -13,15 +13,18 @@ import { Navbar } from './components/Navbar';
 import { TravellerTripsView } from './components/TravellerTripsView';
 import { getSupabaseInitState, signOutSupabase } from './lib/supabase';
 import {
+  applyReviewMetricsToListings,
   AuthSessionError,
   createBookingAtomic,
   createHostListing,
   deleteHostListing,
   fetchAuthenticatedProfile,
   saveHostPayoutSettings,
+  submitTravellerReview,
   subscribeActiveAvailability,
   subscribeHostBookings,
   subscribeHostListings,
+  subscribeListingReviews,
   subscribePublicListings,
   subscribeTravellerBookings,
   subscribeUserPrivateInfo,
@@ -37,6 +40,7 @@ import {
   Booking,
   CurrencyCode,
   Listing,
+  ListingReview,
   PaymentMethod,
   PaymentMode,
   UserPrivateInfo,
@@ -59,6 +63,7 @@ function TourxAppInner() {
   const [publicListings, setPublicListings] = useState<Listing[]>([]);
   const [hostListings, setHostListings] = useState<Listing[]>([]);
   const [availabilitySlots, setAvailabilitySlots] = useState<AvailabilitySlot[]>([]);
+  const [allReviews, setAllReviews] = useState<ListingReview[]>([]);
   const [travellerBookings, setTravellerBookings] = useState<Booking[]>([]);
   const [hostBookings, setHostBookings] = useState<Booking[]>([]);
 
@@ -78,6 +83,7 @@ function TourxAppInner() {
     setHostPrivateInfo(null);
     setPublicListings([]);
     setAvailabilitySlots([]);
+    setAllReviews([]);
     setTravellerBookings([]);
     setHostBookings([]);
     setHostListings([]);
@@ -217,6 +223,7 @@ function TourxAppInner() {
 
     const unsubListings = subscribePublicListings(setPublicListings);
     const unsubAvailability = subscribeActiveAvailability(setAvailabilitySlots);
+    const unsubReviews = subscribeListingReviews(setAllReviews);
     const unsubTraveller = subscribeTravellerBookings(userProfile.uid, setTravellerBookings);
     const unsubPrivate = subscribeUserPrivateInfo(userProfile.uid, setHostPrivateInfo);
 
@@ -234,6 +241,7 @@ function TourxAppInner() {
     return () => {
       unsubListings();
       unsubAvailability();
+      unsubReviews();
       unsubTraveller();
       unsubPrivate();
       unsubHostListings?.();
@@ -287,6 +295,42 @@ function TourxAppInner() {
     });
   };
 
+  const handleSubmitReview = async (payload: {
+    listingId: string;
+    hostId: string;
+    bookingId?: string;
+    rating: number;
+    comment: string;
+    verifiedStay?: boolean;
+  }) => {
+    if (!userProfile) {
+      throw new Error('Please sign in to submit a rating.');
+    }
+    return submitTravellerReview(userProfile.uid, {
+      ...payload,
+      travellerName: userProfile.displayName,
+    });
+  };
+
+  const allCatalogListings = useMemo(
+    () => applyReviewMetricsToListings(publicListings, allReviews),
+    [publicListings, allReviews],
+  );
+  const enrichedHostListings = useMemo(
+    () => applyReviewMetricsToListings(hostListings, allReviews),
+    [hostListings, allReviews],
+  );
+  const activeSelectedListing = selectedListing
+    ? allCatalogListings.find((item) => item.id === selectedListing.id) || selectedListing
+    : null;
+  const activeSelectedReviews = useMemo(
+    () =>
+      activeSelectedListing
+        ? allReviews.filter((r) => r.listingId === activeSelectedListing.id)
+        : [],
+    [activeSelectedListing, allReviews],
+  );
+
   if (!authReady) {
     return (
       <div className="min-h-screen bg-[#07141A] text-white flex flex-col items-center justify-center p-6">
@@ -305,11 +349,6 @@ function TourxAppInner() {
       />
     );
   }
-
-  const allCatalogListings = publicListings;
-  const activeSelectedListing = selectedListing
-    ? allCatalogListings.find((item) => item.id === selectedListing.id) || selectedListing
-    : null;
 
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900">
@@ -382,6 +421,7 @@ function TourxAppInner() {
           <TravellerTripsView
             userProfile={userProfile}
             bookings={travellerBookings}
+            reviews={allReviews}
             currency={currency}
             onOpenAuth={() => {
               setAuthModalFocus('traveller');
@@ -389,6 +429,7 @@ function TourxAppInner() {
             }}
             onExplore={() => setActiveView('discover')}
             onCancelBooking={(id) => updateBookingStatusAtomic(id, 'cancelled')}
+            onSubmitReview={handleSubmitReview}
           />
         )}
 
@@ -396,7 +437,7 @@ function TourxAppInner() {
           <HostStudioView
             userProfile={userProfile}
             hostPrivateInfo={hostPrivateInfo}
-            hostListings={hostListings}
+            hostListings={enrichedHostListings}
             hostBookings={hostBookings}
             availabilitySlots={availabilitySlots}
             currency={currency}
@@ -425,6 +466,7 @@ function TourxAppInner() {
             onUpdateBlockedDates={updateListingBlockedDates}
             onDeleteListing={deleteHostListing}
             onUpdateBookingStatus={updateBookingStatusAtomic}
+            onViewMarketplace={() => setActiveView('discover')}
           />
         )}
       </div>
@@ -466,6 +508,8 @@ function TourxAppInner() {
       <ListingDetailModal
         listing={activeSelectedListing}
         availabilitySlots={availabilitySlots}
+        reviews={activeSelectedReviews}
+        userBookings={travellerBookings}
         currency={currency}
         userProfile={userProfile}
         onClose={() => setSelectedListing(null)}
@@ -477,6 +521,7 @@ function TourxAppInner() {
           setVoiceContext({ destination, listing: listingTitle });
           setLiveVoiceOpen(true);
         }}
+        onSubmitReview={handleSubmitReview}
         onCompleteBooking={handleCompleteBooking}
         onViewTrips={() => setActiveView('trips')}
       />

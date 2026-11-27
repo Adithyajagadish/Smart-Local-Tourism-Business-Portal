@@ -19,15 +19,27 @@ import {
 } from '../utils/dates';
 import { AvailabilityCalendar } from './AvailabilityCalendar';
 import { PaymentGatewayModal, ResolvedPaymentDestination } from './PaymentGatewayModal';
+import { StarRatingInput } from './StarRatingInput';
+import type { ListingReview } from '../types';
 
 interface ListingDetailModalProps {
   listing: Listing | null;
   availabilitySlots: AvailabilitySlot[];
+  reviews: ListingReview[];
+  userBookings: Booking[];
   currency: CurrencyCode;
   userProfile: UserProfile | null;
   onClose: () => void;
   onRequireSignIn: () => void;
   onOpenVoice: (destination: string, listingTitle: string) => void;
+  onSubmitReview: (input: {
+    listingId: string;
+    hostId: string;
+    bookingId?: string;
+    rating: number;
+    comment: string;
+    verifiedStay?: boolean;
+  }) => Promise<ListingReview>;
   onCompleteBooking: (payload: {
     listing: Listing;
     checkInDate: string;
@@ -51,11 +63,14 @@ interface ListingDetailModalProps {
 export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   listing,
   availabilitySlots,
+  reviews,
+  userBookings,
   currency,
   userProfile,
   onClose,
   onRequireSignIn,
   onOpenVoice,
+  onSubmitReview,
   onCompleteBooking,
   onViewTrips,
 }) => {
@@ -69,6 +84,18 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   const [resolvedDestination, setResolvedDestination] = useState<ResolvedPaymentDestination | null>(
     null,
   );
+  const [draftRating, setDraftRating] = useState(5);
+  const [draftComment, setDraftComment] = useState('');
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewSavedNotice, setReviewSavedNotice] = useState<string | null>(null);
+
+  const existingUserReview = useMemo(() => {
+    if (!listing || !userProfile) return null;
+    return reviews.find(
+      (r) => r.listingId === listing.id && r.travellerId === userProfile.uid,
+    ) || null;
+  }, [listing, reviews, userProfile]);
 
   useEffect(() => {
     setActivePhotoIdx(0);
@@ -79,7 +106,19 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
     setLoadingGateway(false);
     setGatewayError(null);
     setResolvedDestination(null);
+    setReviewError(null);
+    setReviewSavedNotice(null);
   }, [listing?.id, listing?.maxGuests]);
+
+  useEffect(() => {
+    if (existingUserReview) {
+      setDraftRating(existingUserReview.rating);
+      setDraftComment(existingUserReview.comment);
+    } else {
+      setDraftRating(5);
+      setDraftComment('');
+    }
+  }, [existingUserReview?.id, existingUserReview?.rating, existingUserReview?.comment]);
 
   const unavailableDates = useMemo(() => {
     if (!listing) return {};
@@ -271,6 +310,197 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* Traveller Ratings & Reviews */}
+                <div className="pt-5 border-t border-slate-200 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-base font-bold text-slate-900">
+                      Traveller Ratings &amp; Reviews
+                    </h3>
+                    <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
+                      <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
+                      <span className="font-mono-nums">{listing.rating.toFixed(1)}</span>
+                      <span className="text-xs font-normal text-slate-500">
+                        ({reviews.length} {reviews.length === 1 ? 'review' : 'reviews'})
+                      </span>
+                    </div>
+                  </div>
+
+                  {reviews.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                      {[5, 4, 3, 2, 1].map((starValue) => {
+                        const count = reviews.filter((r) => r.rating === starValue).length;
+                        const pct = Math.round((count / reviews.length) * 100);
+                        return (
+                          <div key={`dist-${starValue}`} className="flex items-center gap-2 text-xs">
+                            <span className="w-7 font-mono-nums text-slate-700 shrink-0">
+                              {starValue}★
+                            </span>
+                            <div className="flex-1 h-2 rounded-full bg-slate-200 overflow-hidden">
+                              <div
+                                className="h-full bg-amber-400 rounded-full transition-all"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="w-6 text-right font-mono-nums text-slate-500 shrink-0">
+                              {count}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Traveller Rating Form */}
+                  {userProfile ? (
+                    userProfile.accountType === 'traveller' ? (
+                      <form
+                        onSubmit={async (e) => {
+                          e.preventDefault();
+                          setReviewError(null);
+                          setReviewSavedNotice(null);
+                          setSubmittingReview(true);
+                          try {
+                            const matchingBooking = userBookings.find(
+                              (b) =>
+                                b.listingId === listing.id &&
+                                b.travellerId === userProfile.uid &&
+                                b.bookingStatus !== 'cancelled',
+                            );
+                            await onSubmitReview({
+                              listingId: listing.id,
+                              hostId: listing.hostId,
+                              bookingId: matchingBooking?.id,
+                              rating: draftRating,
+                              comment: draftComment,
+                              verifiedStay: Boolean(matchingBooking),
+                            });
+                            setReviewSavedNotice(
+                              existingUserReview
+                                ? 'Your rating has been updated.'
+                                : 'Thank you! Your rating is now live.',
+                            );
+                          } catch (err) {
+                            setReviewError(
+                              err instanceof Error ? err.message : 'Unable to save rating.',
+                            );
+                          } finally {
+                            setSubmittingReview(false);
+                          }
+                        }}
+                        className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-slate-900">
+                            {existingUserReview
+                              ? 'Update Your Traveller Rating'
+                              : 'Rate This Place or Experience'}
+                          </span>
+                          <StarRatingInput
+                            value={draftRating}
+                            onChange={setDraftRating}
+                            disabled={submittingReview}
+                          />
+                        </div>
+
+                        <textarea
+                          rows={2}
+                          maxLength={600}
+                          value={draftComment}
+                          onChange={(e) => setDraftComment(e.target.value)}
+                          placeholder="Share helpful tips about hospitality, cleanliness, or local experience..."
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-600"
+                        />
+
+                        {reviewError && (
+                          <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                            {reviewError}
+                          </div>
+                        )}
+                        {reviewSavedNotice && (
+                          <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700">
+                            {reviewSavedNotice}
+                          </div>
+                        )}
+
+                        <div className="flex justify-end">
+                          <button
+                            type="submit"
+                            disabled={submittingReview}
+                            className="px-4 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-60 transition-colors"
+                          >
+                            {submittingReview
+                              ? 'Saving...'
+                              : existingUserReview
+                                ? 'Update Rating'
+                                : 'Submit Rating'}
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                        You are viewing in Host Studio mode. Switch to Traveller portal to submit a traveller rating.
+                      </div>
+                    )
+                  ) : (
+                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+                      <span className="text-xs text-slate-600">
+                        Sign in as a Traveller to rate and review this listing.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={onRequireSignIn}
+                        className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 shrink-0"
+                      >
+                        Sign In
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Reviews List */}
+                  {reviews.length === 0 ? (
+                    <p className="text-xs text-slate-500">
+                      No written traveller reviews yet. Be the first to rate!
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {reviews.map((rev) => (
+                        <div
+                          key={rev.id}
+                          className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-slate-900">
+                                {rev.travellerName}
+                              </span>
+                              {rev.verifiedStay && (
+                                <span className="text-[11px] font-medium text-teal-700">
+                                  · Verified Booking
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {[1, 2, 3, 4, 5].map((s) => (
+                                <Star
+                                  key={`${rev.id}-s-${s}`}
+                                  className={`w-3.5 h-3.5 ${
+                                    s <= rev.rating
+                                      ? 'fill-amber-400 text-amber-400'
+                                      : 'text-slate-200'
+                                  }`}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                          {rev.comment && (
+                            <p className="text-xs text-slate-600 leading-relaxed">{rev.comment}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 

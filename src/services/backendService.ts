@@ -8,6 +8,7 @@ import {
   Listing,
   ListingCategory,
   ListingPaymentDestination,
+  ListingReview,
   PaymentMethod,
   PaymentMode,
   PreferredPaymentApp,
@@ -94,6 +95,16 @@ export interface CreateBookingPayload {
   hostUpiId: string;
 }
 
+export interface SubmitReviewInput {
+  listingId: string;
+  hostId: string;
+  bookingId?: string;
+  rating: number;
+  comment: string;
+  travellerName: string;
+  verifiedStay?: boolean;
+}
+
 type ChangeListener = () => void;
 const changeListeners = new Set<ChangeListener>();
 
@@ -108,6 +119,9 @@ const LISTING_QR_STORAGE_KEY = 'tourx_listing_qr_fallback';
 const PORTAL_ROLE_OVERRIDE_KEY = 'tourx_portal_role_override';
 const LOCAL_BOOKINGS_STORAGE_KEY = 'tourx_local_test_bookings_v1';
 const LOCAL_SLOTS_STORAGE_KEY = 'tourx_local_test_slots_v1';
+const LOCAL_LISTINGS_STORAGE_KEY = 'tourx_local_listings_v1';
+const LOCAL_LISTING_DESTS_STORAGE_KEY = 'tourx_local_listing_dests_v1';
+const LOCAL_REVIEWS_STORAGE_KEY = 'tourx_local_reviews_v1';
 
 let apiBackendMode: 'unknown' | 'server' | 'supabase-direct' = 'unknown';
 
@@ -120,6 +134,129 @@ function isRlsOrPermissionError(err: unknown): boolean {
     msg.includes('42501') ||
     msg.includes('service_role')
   );
+}
+
+function isMissingReviewsTableError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
+  return (
+    msg.includes('listing_reviews') &&
+    (msg.includes('does not exist') ||
+      msg.includes('schema cache') ||
+      msg.includes('could not find the table') ||
+      msg.includes('relation'))
+  );
+}
+
+function readLocalReviews(): ListingReview[] {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_REVIEWS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ListingReview[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalReviews(items: ListingReview[]): void {
+  try {
+    window.localStorage.setItem(LOCAL_REVIEWS_STORAGE_KEY, JSON.stringify(items.slice(0, 300)));
+  } catch {
+    // Ignore localStorage quota/private-mode errors
+  }
+}
+
+function mergeReviewsWithLocal(remote: ListingReview[]): ListingReview[] {
+  const local = readLocalReviews();
+  if (local.length === 0) return remote;
+  const byId = new Map<string, ListingReview>();
+  for (const item of remote) {
+    byId.set(item.id, item);
+  }
+  for (const item of local) {
+    const existing = byId.get(item.id);
+    if (!existing) {
+      byId.set(item.id, item);
+    } else {
+      const localTs = Date.parse(String(item.updatedAt || item.createdAt || '')) || 0;
+      const remoteTs = Date.parse(String(existing.updatedAt || existing.createdAt || '')) || 0;
+      if (localTs > remoteTs) {
+        byId.set(item.id, item);
+      }
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => {
+    const ta = Date.parse(String(a.updatedAt || a.createdAt || '')) || 0;
+    const tb = Date.parse(String(b.updatedAt || b.createdAt || '')) || 0;
+    return tb - ta;
+  });
+}
+
+function readLocalListings(): Listing[] {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_LISTINGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Listing[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalListings(items: Listing[]): void {
+  try {
+    window.localStorage.setItem(LOCAL_LISTINGS_STORAGE_KEY, JSON.stringify(items.slice(0, 60)));
+  } catch {
+    // Ignore localStorage quota/private-mode errors
+  }
+}
+
+function readLocalListingDestinations(): Record<string, ListingPaymentDestination> {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_LISTING_DESTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, ListingPaymentDestination>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalListingDestination(
+  listingId: string,
+  dest: ListingPaymentDestination | null,
+): void {
+  try {
+    const map = readLocalListingDestinations();
+    if (dest) {
+      map[listingId] = dest;
+    } else {
+      delete map[listingId];
+    }
+    window.localStorage.setItem(LOCAL_LISTING_DESTS_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore localStorage quota/private-mode errors
+  }
+}
+
+function mergeListingsWithLocal(
+  remote: Listing[],
+  filterFn: (item: Listing) => boolean,
+): Listing[] {
+  const local = readLocalListings().filter(filterFn);
+  if (local.length === 0) return remote;
+  const byId = new Map<string, Listing>();
+  for (const item of remote) {
+    byId.set(item.id, item);
+  }
+  for (const item of local) {
+    if (!byId.has(item.id)) {
+      byId.set(item.id, item);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 function readLocalTestBookings(): Booking[] {
@@ -416,6 +553,22 @@ function mapAvailabilitySlot(row: Record<string, unknown>): AvailabilitySlot {
   };
 }
 
+function mapListingReview(row: Record<string, unknown>): ListingReview {
+  return {
+    id: String(row.id),
+    listingId: String(row.listing_id),
+    bookingId: row.booking_id ? String(row.booking_id) : '',
+    hostId: String(row.host_id),
+    travellerId: String(row.traveller_id),
+    travellerName: String(row.traveller_name || 'Tourx Traveller'),
+    rating: Math.max(1, Math.min(5, Math.round(Number(row.rating ?? 5)))),
+    comment: String(row.comment || ''),
+    verifiedStay: Boolean(row.verified_stay),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 async function apiJson<T>(
   url: string,
   init?: RequestInit,
@@ -709,9 +862,14 @@ function createPollingSubscription<T>(
 ): () => void {
   let active = true;
   let inFlight = false;
+  let pendingRefresh = false;
 
   const refresh = async () => {
-    if (!active || inFlight) return;
+    if (!active) return;
+    if (inFlight) {
+      pendingRefresh = true;
+      return;
+    }
     inFlight = true;
     try {
       const data = await fetcher();
@@ -724,6 +882,10 @@ function createPollingSubscription<T>(
       }
     } finally {
       inFlight = false;
+      if (active && pendingRefresh) {
+        pendingRefresh = false;
+        void refresh();
+      }
     }
   };
 
@@ -746,8 +908,8 @@ function createPollingSubscription<T>(
 
 export function subscribePublicListings(onData: (items: Listing[]) => void): () => void {
   return createPollingSubscription(
-    () =>
-      withBackendFallback(
+    async () => {
+      const remote = await withBackendFallback(
         () => apiJson<Listing[]>('/api/listings'),
         async () => {
           const supabase = await getSupabaseClient();
@@ -759,7 +921,9 @@ export function subscribePublicListings(onData: (items: Listing[]) => void): () 
           if (error) throw new Error(error.message);
           return (data || []).map((row) => mapListing(row as Record<string, unknown>));
         },
-      ),
+      );
+      return mergeListingsWithLocal(remote, (l) => l.isPublished);
+    },
     onData,
   );
 }
@@ -769,8 +933,8 @@ export function subscribeHostListings(
   onData: (items: Listing[]) => void,
 ): () => void {
   return createPollingSubscription(
-    () =>
-      withBackendFallback(
+    async () => {
+      const remote = await withBackendFallback(
         () => apiJson<Listing[]>(`/api/hosts/${encodeURIComponent(hostId)}/listings`),
         async () => {
           const supabase = await getSupabaseClient();
@@ -782,7 +946,9 @@ export function subscribeHostListings(
           if (error) throw new Error(error.message);
           return (data || []).map((row) => mapListing(row as Record<string, unknown>));
         },
-      ),
+      );
+      return mergeListingsWithLocal(remote, (l) => l.hostId === hostId);
+    },
     onData,
   );
 }
@@ -977,12 +1143,17 @@ export async function saveHostPayoutSettings(
 export async function getListingPaymentDestination(
   listingId: string,
 ): Promise<ListingPaymentDestination | null> {
-  return withBackendFallback(
+  const localDest = readLocalListingDestinations()[listingId];
+  if (listingId.startsWith('lst-local-') && localDest) {
+    return localDest;
+  }
+
+  const remoteDest = await withBackendFallback<ListingPaymentDestination | null>(
     () =>
       apiJson<ListingPaymentDestination | null>(
         `/api/listings/${encodeURIComponent(listingId)}/payment-destination`,
       ),
-    async () => {
+    async (): Promise<ListingPaymentDestination | null> => {
       const supabase = await getSupabaseClient();
       const { data: destRow } = await supabase
         .from('listing_payment_destinations')
@@ -1037,6 +1208,7 @@ export async function getListingPaymentDestination(
       };
     },
   );
+  return remoteDest || localDest || null;
 }
 
 export async function createHostListing(
@@ -1044,73 +1216,152 @@ export async function createHostListing(
   hostName: string,
   input: CreateListingInput,
 ): Promise<string> {
-  const res = await withBackendFallback(
-    () =>
-      apiJson<{ id: string }>('/api/listings', {
-        method: 'POST',
-        body: JSON.stringify({ hostId, hostName, input }),
-      }),
-    async () => {
-      const supabase = await getSupabaseClient();
-      const listingId = `lst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-      const now = new Date().toISOString();
+  const buildLocalListingRecord = (listingId: string, ownerId: string): Listing => {
+    const now = new Date().toISOString();
+    return {
+      id: listingId,
+      hostId: ownerId,
+      hostName: clampString(hostName, 80) || 'Tourx Host',
+      category: input.category,
+      title: clampString(input.title, 140),
+      description: clampString(input.description, 2000),
+      locationName: clampString(input.locationName, 140),
+      country: clampString(input.country, 80),
+      lat: Number.isFinite(Number(input.lat)) ? Number(input.lat) : 15.2993,
+      lng: Number.isFinite(Number(input.lng)) ? Number(input.lng) : 74.124,
+      pricePerUnitInr: Number.isFinite(Number(input.pricePerUnitInr))
+        ? Math.max(100, Math.round(Number(input.pricePerUnitInr)))
+        : 1000,
+      unitLabel: input.unitLabel,
+      maxGuests: Number.isFinite(Number(input.maxGuests))
+        ? Math.max(1, Math.min(30, Math.round(Number(input.maxGuests))))
+        : 2,
+      amenities: (input.amenities || []).slice(0, 15).map((a) => clampString(a, 60)),
+      photos: (input.photos || []).slice(0, 6),
+      blockedDates: (input.blockedDates || []).slice(0, 365),
+      isPublished: Boolean(input.isPublished),
+      rating: 5.0,
+      reviewCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+  };
 
-      const { error } = await supabase.from('listings').insert({
-        id: listingId,
-        host_id: hostId,
-        host_name: clampString(hostName, 80) || 'Tourx Host',
-        category: input.category,
-        title: clampString(input.title, 140),
-        description: clampString(input.description, 2000),
-        location_name: clampString(input.locationName, 140),
-        country: clampString(input.country, 80),
-        lat: Number(input.lat),
-        lng: Number(input.lng),
-        price_per_unit_inr: Math.max(100, Math.round(Number(input.pricePerUnitInr))),
-        unit_label: input.unitLabel,
-        max_guests: Math.max(1, Math.min(30, Math.round(Number(input.maxGuests)))),
-        amenities: (input.amenities || []).slice(0, 15).map((a) => clampString(a, 60)),
-        photos: (input.photos || []).slice(0, 6),
-        blocked_dates: (input.blockedDates || []).slice(0, 365),
-        is_published: Boolean(input.isPublished),
-        rating: 5.0,
-        review_count: 0,
-        created_at: now,
-        updated_at: now,
-      });
+  let res: { id: string };
+  try {
+    res = await withBackendFallback(
+      () =>
+        apiJson<{ id: string }>('/api/listings', {
+          method: 'POST',
+          body: JSON.stringify({ hostId, hostName, input }),
+        }),
+      async () => {
+        const supabase = await getSupabaseClient();
+        const { data: authData } = await supabase.auth
+          .getUser()
+          .catch(() => ({ data: { user: null } }));
+        const verifiedHostId = authData?.user?.id || hostId;
+        const listingId = `lst-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+        const now = new Date().toISOString();
 
-      if (error) throw new Error(error.message || 'Failed to create listing.');
+        const safeLat = Number.isFinite(Number(input.lat))
+          ? Math.max(-90, Math.min(90, Number(input.lat)))
+          : 15.2993;
+        const safeLng = Number.isFinite(Number(input.lng))
+          ? Math.max(-180, Math.min(180, Number(input.lng)))
+          : 74.124;
+        const safePrice = Number.isFinite(Number(input.pricePerUnitInr))
+          ? Math.max(100, Math.min(500000, Math.round(Number(input.pricePerUnitInr))))
+          : 1000;
+        const safeGuests = Number.isFinite(Number(input.maxGuests))
+          ? Math.max(1, Math.min(30, Math.round(Number(input.maxGuests))))
+          : 2;
 
-      if (input.paymentDestination) {
-        const paymentQrUrl = clampString(input.paymentDestination.paymentQrUrl || '', 750000);
-        writeQrEntry(LISTING_QR_STORAGE_KEY, listingId, paymentQrUrl);
-        const destBase = {
-          listing_id: listingId,
-          host_id: hostId,
-          payee_name: clampString(input.paymentDestination.payeeName, 80),
-          payment_phone: clampString(input.paymentDestination.paymentPhone, 32),
-          upi_id: clampString(input.paymentDestination.upiId, 80),
-          preferred_app:
-            input.paymentDestination.preferredApp === 'phonepe' ||
-            input.paymentDestination.preferredApp === 'gpay'
-              ? input.paymentDestination.preferredApp
-              : 'both',
+        const { error } = await supabase.from('listings').insert({
+          id: listingId,
+          host_id: verifiedHostId,
+          host_name: clampString(hostName, 80) || 'Tourx Host',
+          category: input.category,
+          title: clampString(input.title, 140),
+          description: clampString(input.description, 2000),
+          location_name: clampString(input.locationName, 140),
+          country: clampString(input.country, 80),
+          lat: safeLat,
+          lng: safeLng,
+          price_per_unit_inr: safePrice,
+          unit_label: input.unitLabel,
+          max_guests: safeGuests,
+          amenities: (input.amenities || []).slice(0, 15).map((a) => clampString(a, 60)),
+          photos: (input.photos || []).slice(0, 6),
+          blocked_dates: (input.blockedDates || []).slice(0, 365),
+          is_published: Boolean(input.isPublished),
+          rating: 5.0,
+          review_count: 0,
           created_at: now,
           updated_at: now,
-        };
-        const destRes = await supabase
-          .from('listing_payment_destinations')
-          .upsert({ ...destBase, payment_qr_url: paymentQrUrl }, { onConflict: 'listing_id' });
-        if (destRes.error && isMissingPaymentQrColumnError(destRes.error.message)) {
-          await supabase
-            .from('listing_payment_destinations')
-            .upsert(destBase, { onConflict: 'listing_id' });
-        }
-      }
+        });
 
-      return { id: listingId };
-    },
-  );
+        if (error) {
+          if (isRlsOrPermissionError(error.message)) {
+            throw new RlsPermissionError(error.message);
+          }
+          throw new Error(error.message || 'Failed to create listing.');
+        }
+
+        if (input.paymentDestination) {
+          const paymentQrUrl = clampString(input.paymentDestination.paymentQrUrl || '', 750000);
+          writeQrEntry(LISTING_QR_STORAGE_KEY, listingId, paymentQrUrl);
+          const destBase = {
+            listing_id: listingId,
+            host_id: verifiedHostId,
+            payee_name: clampString(input.paymentDestination.payeeName, 80),
+            payment_phone: clampString(input.paymentDestination.paymentPhone, 32),
+            upi_id: clampString(input.paymentDestination.upiId, 80),
+            preferred_app:
+              input.paymentDestination.preferredApp === 'phonepe' ||
+              input.paymentDestination.preferredApp === 'gpay'
+                ? input.paymentDestination.preferredApp
+                : 'both',
+            created_at: now,
+            updated_at: now,
+          };
+          const destRes = await supabase
+            .from('listing_payment_destinations')
+            .upsert({ ...destBase, payment_qr_url: paymentQrUrl }, { onConflict: 'listing_id' });
+          if (destRes.error && isMissingPaymentQrColumnError(destRes.error.message)) {
+            await supabase
+              .from('listing_payment_destinations')
+              .upsert(destBase, { onConflict: 'listing_id' });
+          }
+        }
+
+        return { id: listingId };
+      },
+    );
+  } catch (err) {
+    if (isRlsOrPermissionError(err)) {
+      const localId = `lst-local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const localListing = buildLocalListingRecord(localId, hostId);
+      writeLocalListings([localListing, ...readLocalListings().filter((l) => l.id !== localId)]);
+      if (input.paymentDestination) {
+        const paymentQrUrl = clampString(input.paymentDestination.paymentQrUrl || '', 750000);
+        writeQrEntry(LISTING_QR_STORAGE_KEY, localId, paymentQrUrl);
+        writeLocalListingDestination(localId, {
+          listingId: localId,
+          hostId,
+          payeeName: clampString(input.paymentDestination.payeeName, 80) || localListing.hostName,
+          paymentPhone: clampString(input.paymentDestination.paymentPhone, 32),
+          upiId: clampString(input.paymentDestination.upiId, 80),
+          preferredApp: input.paymentDestination.preferredApp || 'both',
+          paymentQrUrl,
+        });
+      }
+      emitBackendChange();
+      return localId;
+    }
+    throw err;
+  }
+
   emitBackendChange();
   return res.id;
 }
@@ -1121,6 +1372,45 @@ export async function updateHostListing(
   hostName: string,
   input: Omit<CreateListingInput, 'blockedDates'>,
 ): Promise<void> {
+  const localListings = readLocalListings();
+  const existingLocal = localListings.find((l) => l.id === listingId);
+  if (existingLocal) {
+    const updated: Listing = {
+      ...existingLocal,
+      hostName: clampString(hostName, 80) || existingLocal.hostName,
+      category: input.category,
+      title: clampString(input.title, 140),
+      description: clampString(input.description, 2000),
+      locationName: clampString(input.locationName, 140),
+      country: clampString(input.country, 80),
+      lat: Number(input.lat),
+      lng: Number(input.lng),
+      pricePerUnitInr: Math.max(100, Math.round(Number(input.pricePerUnitInr))),
+      unitLabel: input.unitLabel,
+      maxGuests: Math.max(1, Math.min(30, Math.round(Number(input.maxGuests)))),
+      amenities: (input.amenities || []).slice(0, 15).map((a) => clampString(a, 60)),
+      photos: (input.photos || []).slice(0, 6),
+      isPublished: Boolean(input.isPublished),
+      updatedAt: new Date().toISOString(),
+    };
+    writeLocalListings(localListings.map((l) => (l.id === listingId ? updated : l)));
+    if (input.paymentDestination) {
+      const paymentQrUrl = clampString(input.paymentDestination.paymentQrUrl || '', 750000);
+      writeQrEntry(LISTING_QR_STORAGE_KEY, listingId, paymentQrUrl);
+      writeLocalListingDestination(listingId, {
+        listingId,
+        hostId,
+        payeeName: clampString(input.paymentDestination.payeeName, 80) || updated.hostName,
+        paymentPhone: clampString(input.paymentDestination.paymentPhone, 32),
+        upiId: clampString(input.paymentDestination.upiId, 80),
+        preferredApp: input.paymentDestination.preferredApp || 'both',
+        paymentQrUrl,
+      });
+    }
+    emitBackendChange();
+    return;
+  }
+
   await withBackendFallback(
     () =>
       apiJson<Listing>(`/api/listings/${encodeURIComponent(listingId)}`, {
@@ -1192,6 +1482,20 @@ export async function updateListingBlockedDates(
   listingId: string,
   blockedDates: string[],
 ): Promise<void> {
+  const localListings = readLocalListings();
+  const existingLocal = localListings.find((l) => l.id === listingId);
+  if (existingLocal) {
+    writeLocalListings(
+      localListings.map((l) =>
+        l.id === listingId
+          ? { ...l, blockedDates: blockedDates.slice(0, 365), updatedAt: new Date().toISOString() }
+          : l,
+      ),
+    );
+    emitBackendChange();
+    return;
+  }
+
   await withBackendFallback(
     () =>
       apiJson<Listing>(`/api/listings/${encodeURIComponent(listingId)}/blocked-dates`, {
@@ -1217,6 +1521,14 @@ export async function updateListingBlockedDates(
 }
 
 export async function deleteHostListing(listingId: string): Promise<void> {
+  const localListings = readLocalListings();
+  if (localListings.some((l) => l.id === listingId)) {
+    writeLocalListings(localListings.filter((l) => l.id !== listingId));
+    writeLocalListingDestination(listingId, null);
+    emitBackendChange();
+    return;
+  }
+
   await withBackendFallback(
     () =>
       apiJson<{ ok: boolean }>(`/api/listings/${encodeURIComponent(listingId)}`, {
@@ -1271,6 +1583,30 @@ export async function createBookingAtomic(payload: CreateBookingPayload): Promis
       updatedAt: now,
     };
   };
+
+  const localFallbackListing = readLocalListings().find((l) => l.id === payload.listing.id);
+  if (localFallbackListing) {
+    const requestedDays = expandRange(payload.checkInDate, payload.checkOutDate);
+    const blockedSet = new Set(localFallbackListing.blockedDates || []);
+    if (requestedDays.some((day) => blockedSet.has(day))) {
+      throw new Error('Selected dates include host-blocked dates. Please pick another range.');
+    }
+    const takenDays = new Set<string>();
+    for (const s of readLocalTestSlots()) {
+      if (s.listingId !== localFallbackListing.id || s.status !== 'active') continue;
+      for (const d of expandRange(s.checkInDate, s.checkOutDate)) {
+        takenDays.add(d);
+      }
+    }
+    if (requestedDays.some((day) => takenDays.has(day))) {
+      throw new Error('Those dates were just reserved. Please choose different dates.');
+    }
+    const localId = `bk-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const localBooking = buildLocalBookingRecord(localId, payload.travellerId);
+    saveLocalTestBooking(localBooking);
+    emitBackendChange();
+    return localBooking;
+  }
 
   let booking: Booking;
   try {
@@ -1489,3 +1825,157 @@ export async function updateBookingStatusAtomic(
   );
   emitBackendChange();
 }
+
+export function subscribeListingReviews(onData: (reviews: ListingReview[]) => void): () => void {
+  return createPollingSubscription(
+    async () => {
+      const remote = await withBackendFallback(
+        () => apiJson<ListingReview[]>('/api/reviews'),
+        async () => {
+          const supabase = await getSupabaseClient();
+          const { data, error } = await supabase
+            .from('listing_reviews')
+            .select('*')
+            .order('updated_at', { ascending: false });
+          if (error) {
+            if (isMissingReviewsTableError(error.message) || isRlsOrPermissionError(error.message)) {
+              return [];
+            }
+            throw new Error(error.message);
+          }
+          return (data || []).map((row) => mapListingReview(row as Record<string, unknown>));
+        },
+      );
+      return mergeReviewsWithLocal(remote);
+    },
+    onData,
+  );
+}
+
+export async function submitTravellerReview(
+  travellerId: string,
+  input: SubmitReviewInput,
+): Promise<ListingReview> {
+  const cleanRating = Math.max(1, Math.min(5, Math.round(Number(input.rating))));
+  const cleanComment = clampString(input.comment, 600);
+  const now = new Date().toISOString();
+
+  const buildLocalReview = (ownerId: string): ListingReview => ({
+    id: `rv_${input.listingId}_${ownerId}`,
+    listingId: input.listingId,
+    bookingId: input.bookingId || '',
+    hostId: input.hostId,
+    travellerId: ownerId,
+    travellerName: clampString(input.travellerName, 80) || 'Tourx Traveller',
+    rating: cleanRating,
+    comment: cleanComment,
+    verifiedStay: Boolean(input.verifiedStay),
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  if (input.listingId.startsWith('lst-local-')) {
+    const localReview = buildLocalReview(travellerId);
+    writeLocalReviews([
+      localReview,
+      ...readLocalReviews().filter((r) => r.id !== localReview.id),
+    ]);
+    emitBackendChange();
+    return localReview;
+  }
+
+  let saved: ListingReview;
+  try {
+    saved = await withBackendFallback(
+      () =>
+        apiJson<ListingReview>('/api/reviews', {
+          method: 'POST',
+          body: JSON.stringify({
+            listingId: input.listingId,
+            hostId: input.hostId,
+            bookingId: input.bookingId,
+            rating: cleanRating,
+            comment: cleanComment,
+            travellerName: input.travellerName,
+            verifiedStay: input.verifiedStay,
+          }),
+        }),
+      async () => {
+        const supabase = await getSupabaseClient();
+        const { data: authData } = await supabase.auth
+          .getUser()
+          .catch(() => ({ data: { user: null } }));
+        const verifiedTravellerId = authData?.user?.id || travellerId;
+        const verifiedReviewId = `rv_${input.listingId}_${verifiedTravellerId}`;
+
+        const { data, error } = await supabase
+          .from('listing_reviews')
+          .upsert(
+            {
+              id: verifiedReviewId,
+              listing_id: input.listingId,
+              booking_id: clampString(input.bookingId || '', 120),
+              host_id: input.hostId,
+              traveller_id: verifiedTravellerId,
+              traveller_name: clampString(input.travellerName, 80) || 'Tourx Traveller',
+              rating: cleanRating,
+              comment: cleanComment,
+              verified_stay: Boolean(input.verifiedStay),
+              updated_at: now,
+            },
+            { onConflict: 'id' },
+          )
+          .select('*')
+          .single();
+
+        if (error || !data) {
+          const msg = error?.message || 'Unable to save rating.';
+          if (isMissingReviewsTableError(msg) || isRlsOrPermissionError(msg)) {
+            throw new RlsPermissionError(msg);
+          }
+          throw new Error(msg);
+        }
+
+        return mapListingReview(data as Record<string, unknown>);
+      },
+    );
+  } catch (err) {
+    if (isRlsOrPermissionError(err) || isMissingReviewsTableError(err) || (err instanceof Error && err.message.includes('(503)'))) {
+      const localReview = buildLocalReview(travellerId);
+      writeLocalReviews([
+        localReview,
+        ...readLocalReviews().filter((r) => r.id !== localReview.id),
+      ]);
+      emitBackendChange();
+      return localReview;
+    }
+    throw err;
+  }
+
+  emitBackendChange();
+  return saved;
+}
+
+export function applyReviewMetricsToListings(
+  listings: Listing[],
+  reviews: ListingReview[],
+): Listing[] {
+  if (reviews.length === 0) return listings;
+  const stats = new Map<string, { sum: number; count: number }>();
+  for (const rev of reviews) {
+    const prev = stats.get(rev.listingId) || { sum: 0, count: 0 };
+    prev.sum += rev.rating;
+    prev.count += 1;
+    stats.set(rev.listingId, prev);
+  }
+  return listings.map((item) => {
+    const stat = stats.get(item.id);
+    if (!stat || stat.count === 0) return item;
+    return {
+      ...item,
+      rating: Math.round((stat.sum / stat.count) * 10) / 10,
+      reviewCount: stat.count,
+    };
+  });
+}
+

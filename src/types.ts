@@ -113,4 +113,18 @@ export interface AvailabilitySlot {
   status: 'active' | 'cancelled';
 }
 
+export interface ListingReview {
+  id: string;
+  listingId: string;
+  bookingId?: string;
+  hostId: string;
+  travellerId: string;
+  travellerName: string;
+  rating: number;
+  comment: string;
+  verifiedStay: boolean;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
 export type AppView = 'discover' | 'map' | 'trips' | 'host';

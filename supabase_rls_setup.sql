@@ -149,3 +149,48 @@ CREATE POLICY "Travellers and hosts can update availability slots"
   TO authenticated
   USING (auth.uid() = traveller_id OR auth.uid() = host_id)
   WITH CHECK (auth.uid() = traveller_id OR auth.uid() = host_id);
+
+-- 9. listing_reviews table & policies (traveller ratings & reviews)
+CREATE TABLE IF NOT EXISTS public.listing_reviews (
+  id TEXT PRIMARY KEY,
+  listing_id TEXT NOT NULL,
+  booking_id TEXT DEFAULT '',
+  host_id UUID NOT NULL,
+  traveller_id UUID NOT NULL,
+  traveller_name TEXT NOT NULL DEFAULT 'Tourx Traveller',
+  rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  comment TEXT DEFAULT '',
+  verified_stay BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS listing_reviews_listing_traveller_idx
+  ON public.listing_reviews (listing_id, traveller_id);
+
+ALTER TABLE public.listing_reviews ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Authenticated users can read listing reviews" ON public.listing_reviews;
+CREATE POLICY "Authenticated users can read listing reviews"
+  ON public.listing_reviews FOR SELECT
+  TO authenticated
+  USING (true);
+
+DROP POLICY IF EXISTS "Travellers can insert own reviews" ON public.listing_reviews;
+CREATE POLICY "Travellers can insert own reviews"
+  ON public.listing_reviews FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = traveller_id);
+
+DROP POLICY IF EXISTS "Travellers can update own reviews" ON public.listing_reviews;
+CREATE POLICY "Travellers can update own reviews"
+  ON public.listing_reviews FOR UPDATE
+  TO authenticated
+  USING (auth.uid() = traveller_id)
+  WITH CHECK (auth.uid() = traveller_id);
+
+DROP POLICY IF EXISTS "Travellers can delete own reviews" ON public.listing_reviews;
+CREATE POLICY "Travellers can delete own reviews"
+  ON public.listing_reviews FOR DELETE
+  TO authenticated
+  USING (auth.uid() = traveller_id);

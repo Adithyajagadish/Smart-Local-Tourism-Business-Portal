@@ -24,9 +24,16 @@ export const MarketplaceDiscover: React.FC<MarketplaceDiscoverProps> = ({
   const [category, setCategory] = useState<'all' | ListingCategory>('all');
   const [locationQuery, setLocationQuery] = useState('');
   const [minGuests, setMinGuests] = useState(1);
-  const [maxPriceInr, setMaxPriceInr] = useState(20000);
+  const [customMaxPriceInr, setCustomMaxPriceInr] = useState<number | null>(null);
   const [selectedAmenities, setSelectedAmenities] = useState<string[]>([]);
   const [showFilters, setShowFilters] = useState(true);
+
+  const sliderMaxInr = useMemo(() => {
+    const highest = listings.reduce((max, item) => Math.max(max, item.pricePerUnitInr || 0), 25000);
+    return Math.max(25000, Math.ceil(highest / 500) * 500);
+  }, [listings]);
+
+  const maxPriceInr = customMaxPriceInr ?? sliderMaxInr;
 
   const toggleAmenity = (amenity: string) => {
     setSelectedAmenities((prev) =>
@@ -38,7 +45,7 @@ export const MarketplaceDiscover: React.FC<MarketplaceDiscoverProps> = ({
     setCategory('all');
     setLocationQuery('');
     setMinGuests(1);
-    setMaxPriceInr(20000);
+    setCustomMaxPriceInr(null);
     setSelectedAmenities([]);
   };
 
@@ -47,7 +54,7 @@ export const MarketplaceDiscover: React.FC<MarketplaceDiscoverProps> = ({
     return listings.filter((item) => {
       if (category !== 'all' && item.category !== category) return false;
       if (item.maxGuests < minGuests) return false;
-      if (item.pricePerUnitInr > maxPriceInr) return false;
+      if (customMaxPriceInr !== null && item.pricePerUnitInr > customMaxPriceInr) return false;
       if (q) {
         const hay = `${item.locationName} ${item.country} ${item.title} ${item.description}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -58,7 +65,7 @@ export const MarketplaceDiscover: React.FC<MarketplaceDiscoverProps> = ({
       }
       return true;
     });
-  }, [listings, category, minGuests, maxPriceInr, locationQuery, selectedAmenities]);
+  }, [listings, category, minGuests, customMaxPriceInr, locationQuery, selectedAmenities]);
 
   return (
     <div className="bg-white">
@@ -259,15 +266,15 @@ export const MarketplaceDiscover: React.FC<MarketplaceDiscoverProps> = ({
                   id="filter-price-range"
                   type="range"
                   min={1500}
-                  max={25000}
+                  max={sliderMaxInr}
                   step={500}
-                  value={maxPriceInr}
-                  onChange={(e) => setMaxPriceInr(Number(e.target.value))}
+                  value={Math.min(maxPriceInr, sliderMaxInr)}
+                  onChange={(e) => setCustomMaxPriceInr(Number(e.target.value))}
                   className="w-full accent-teal-600 cursor-pointer"
                 />
                 <div className="flex justify-between text-[11px] font-mono-nums text-slate-400 mt-0.5">
                   <span>{formatCurrency(1500, currency)}</span>
-                  <span>{formatCurrency(25000, currency)}</span>
+                  <span>{formatCurrency(sliderMaxInr, currency)}</span>
                 </div>
               </div>
 

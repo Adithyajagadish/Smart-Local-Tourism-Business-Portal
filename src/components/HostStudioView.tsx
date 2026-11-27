@@ -11,6 +11,7 @@ import {
   Phone,
   PlusCircle,
   QrCode,
+  Star,
   Trash2,
   Upload,
   Wallet,
@@ -100,6 +101,7 @@ interface HostStudioViewProps {
   onUpdateBlockedDates: (listingId: string, blockedDates: string[]) => Promise<void>;
   onDeleteListing: (listingId: string) => Promise<void>;
   onUpdateBookingStatus: (bookingId: string, status: Exclude<BookingStatus, 'confirmed'>) => Promise<void>;
+  onViewMarketplace?: () => void;
 }
 
 const DEFAULT_FORM = {
@@ -140,6 +142,7 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
   onUpdateBlockedDates,
   onDeleteListing,
   onUpdateBookingStatus,
+  onViewMarketplace,
 }) => {
   const [switchingToHost, setSwitchingToHost] = useState(false);
   const [switchHostError, setSwitchHostError] = useState<string | null>(null);
@@ -543,30 +546,38 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
       setFormError('Please include at least 1 property or experience photo.');
       return;
     }
+    const effectivePayeeName =
+      form.payeeName.trim() || hostPrivateInfo?.payeeName || userProfile.displayName || 'Tourx Host';
+    const effectiveUpiId =
+      form.upiId.trim() ||
+      (isValidPhoneInput(form.paymentPhone)
+        ? suggestUpiIdFromPhone(form.paymentPhone, form.preferredApp)
+        : '');
+
     const hasListingQr = Boolean(form.paymentQrUrl);
     if (form.paymentPhone.trim() && !isValidPhoneInput(form.paymentPhone)) {
       setFormError('Enter a valid mobile number for PhonePe / Google Pay payments.');
       return;
     }
-    if (form.upiId.trim() && !isValidUpiId(form.upiId)) {
+    if (effectiveUpiId && !isValidUpiId(effectiveUpiId)) {
       setFormError('Enter a valid receiving UPI ID (e.g., 9876543210@ybl or name@okicici).');
       return;
     }
-    if (!hasListingQr && (!isValidPhoneInput(form.paymentPhone) || !isValidUpiId(form.upiId))) {
+    if (!hasListingQr && (!isValidPhoneInput(form.paymentPhone) || !isValidUpiId(effectiveUpiId))) {
       setFormError(
         'Upload your Payment QR code OR enter both your mobile number and UPI ID.',
       );
       return;
     }
-    if (form.payeeName.trim().length < 1 && userProfile.displayName.trim().length < 1) {
+    if (effectivePayeeName.length < 1) {
       setFormError('Enter your payee / account holder name.');
       return;
     }
 
     const paymentDestination: ListingPaymentInput = {
-      payeeName: form.payeeName.trim() || userProfile.displayName,
+      payeeName: effectivePayeeName,
       paymentPhone: form.paymentPhone.trim(),
-      upiId: form.upiId.trim(),
+      upiId: effectiveUpiId,
       preferredApp: form.preferredApp,
       paymentQrUrl: form.paymentQrUrl,
     };
@@ -590,29 +601,47 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
 
     setSaving(true);
     try {
-      // Also keep host's default private payout info updated if it wasn't set yet
+      // Best-effort sync of host's default private payout info (never block listing upload)
       if (!hasConfiguredPayout) {
-        await onSavePayoutSettings({
-          email: hostPrivateInfo?.email || 'host@tourx.app',
-          phone: paymentDestination.paymentPhone,
-          payoutUpiId: paymentDestination.upiId,
-          payeeName: paymentDestination.payeeName,
-          preferredPaymentApp: paymentDestination.preferredApp,
-          paymentQrUrl: paymentDestination.paymentQrUrl,
-          syncExistingListings: false,
-        });
+        try {
+          await onSavePayoutSettings({
+            email: hostPrivateInfo?.email || 'host@tourx.app',
+            phone: paymentDestination.paymentPhone,
+            payoutUpiId: paymentDestination.upiId,
+            payeeName: paymentDestination.payeeName,
+            preferredPaymentApp: paymentDestination.preferredApp,
+            paymentQrUrl: paymentDestination.paymentQrUrl,
+            syncExistingListings: false,
+          });
+        } catch (payoutSyncErr) {
+          console.warn(
+            'Optional default payout sync skipped during listing publish:',
+            payoutSyncErr instanceof Error ? payoutSyncErr.message : payoutSyncErr,
+          );
+        }
       }
 
       if (editingListingId) {
         await onUpdateListing(editingListingId, cleanedPayload);
         setFormSuccess('Listing and receiving payment details updated.');
       } else {
-        await onCreateListing({
+        const createdId = await onCreateListing({
           ...cleanedPayload,
           blockedDates: form.blockedDates,
         });
-        setFormSuccess('Listing published to Tourx Marketplace and World Map with your UPI number.');
+        if (createdId.startsWith('lst-local-')) {
+          setFormSuccess(
+            'Listing published for booking on your Traveller Page (saved locally because Supabase RLS blocked cloud insert — run supabase_rls_setup.sql in Supabase SQL Editor for multi-device sync).',
+          );
+        } else {
+          setFormSuccess(
+            form.isPublished
+              ? 'Listing published live to Tourx Traveller Marketplace and World Map!'
+              : 'Listing saved as paused draft.',
+          );
+        }
       }
+      setEditingListingId(null);
       setActiveTab('listings');
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to save listing.');
@@ -801,18 +830,29 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
       {/* Main Content Area */}
       <main className="flex-1 p-5 sm:p-8 max-w-[1140px]">
         {formSuccess && (
-          <div className="mb-6 p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-800 flex items-center justify-between gap-3">
+          <div className="mb-6 p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-800 flex flex-wrap items-center justify-between gap-3">
             <span className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
               {formSuccess}
             </span>
-            <button
-              type="button"
-              onClick={() => setFormSuccess(null)}
-              className="text-xs font-semibold hover:underline shrink-0"
-            >
-              Dismiss
-            </button>
+            <div className="flex items-center gap-3 shrink-0">
+              {onViewMarketplace && (
+                <button
+                  type="button"
+                  onClick={onViewMarketplace}
+                  className="px-3 py-1 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 transition-colors"
+                >
+                  View on Traveller Page
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setFormSuccess(null)}
+                className="text-xs font-semibold hover:underline shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
         )}
 
@@ -1355,10 +1395,21 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
                           </span>
                         </div>
                         <h3 className="text-base font-bold text-slate-900">{item.title}</h3>
-                        <p className="text-sm font-mono-nums font-bold text-slate-900 mt-2">
-                          {formatCurrency(item.pricePerUnitInr, currency)}{' '}
-                          <span className="text-xs font-normal text-slate-500">/ {item.unitLabel}</span>
-                        </p>
+                        <div className="flex items-center justify-between gap-2 mt-2">
+                          <p className="text-sm font-mono-nums font-bold text-slate-900">
+                            {formatCurrency(item.pricePerUnitInr, currency)}{' '}
+                            <span className="text-xs font-normal text-slate-500">/ {item.unitLabel}</span>
+                          </p>
+                          <div className="flex items-center gap-1 text-xs font-semibold text-slate-700">
+                            <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                            <span className="font-mono-nums">
+                              {item.reviewCount > 0 ? item.rating.toFixed(1) : 'New'}
+                            </span>
+                            <span className="text-slate-400 font-normal">
+                              ({item.reviewCount})
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -1425,7 +1476,7 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
 
         {/* TAB 3: UPLOAD / EDIT LISTING FORM */}
         {activeTab === 'editor' && (
-          <form onSubmit={handleSubmitListing} className="space-y-6 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8">
+          <form onSubmit={handleSubmitListing} noValidate className="space-y-6 bg-white border border-slate-200 rounded-2xl p-6 sm:p-8">
             <div className="flex items-center justify-between pb-4 border-b border-slate-200">
               <div>
                 <h1 className="text-xl font-bold text-slate-900">
@@ -1858,28 +1909,36 @@ export const HostStudioView: React.FC<HostStudioViewProps> = ({
               </div>
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-200">
-              <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.isPublished}
-                  onChange={(e) => setForm((prev) => ({ ...prev, isPublished: e.target.checked }))}
-                  className="rounded border-slate-300 text-teal-600 focus:ring-teal-600"
-                />
-                Publish live on Tourx Marketplace &amp; World Map
-              </label>
+            <div className="pt-4 border-t border-slate-200 space-y-3">
+              {formError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                  {formError}
+                </div>
+              )}
 
-              <button
-                type="submit"
-                disabled={saving}
-                className="px-6 py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700 disabled:opacity-60 transition-colors"
-              >
-                {saving
-                  ? 'Saving...'
-                  : editingListingId
-                    ? 'Save Changes'
-                    : 'Publish Listing'}
-              </button>
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.isPublished}
+                    onChange={(e) => setForm((prev) => ({ ...prev, isPublished: e.target.checked }))}
+                    className="rounded border-slate-300 text-teal-600 focus:ring-teal-600"
+                  />
+                  Publish live on Tourx Marketplace &amp; World Map
+                </label>
+
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="px-6 py-2.5 rounded-lg bg-teal-600 text-white text-sm font-semibold hover:bg-teal-700 disabled:opacity-60 transition-colors"
+                >
+                  {saving
+                    ? 'Saving...'
+                    : editingListingId
+                      ? 'Save Changes'
+                      : 'Publish Listing'}
+                </button>
+              </div>
             </div>
           </form>
         )}

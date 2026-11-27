@@ -17,6 +17,7 @@ import type {
   BookingStatus,
   Listing,
   ListingPaymentDestination,
+  ListingReview,
   PreferredPaymentApp,
   UserPrivateInfo,
   UserProfile,
@@ -113,6 +114,17 @@ function cleanQrDataUrl(value: unknown): string {
 function isMissingPaymentQrColumnError(msg: string | undefined): boolean {
   const lower = (msg || '').toLowerCase();
   return lower.includes('payment_qr_url') && (lower.includes('column') || lower.includes('schema cache'));
+}
+
+function isMissingReviewsTableError(msg: string | undefined): boolean {
+  const lower = (msg || '').toLowerCase();
+  return (
+    lower.includes('listing_reviews') &&
+    (lower.includes('does not exist') ||
+      lower.includes('schema cache') ||
+      lower.includes('could not find the table') ||
+      lower.includes('relation'))
+  );
 }
 
 function resolveSupabaseConfig() {
@@ -417,6 +429,22 @@ function mapAvailabilitySlot(row: Record<string, unknown>): AvailabilitySlot {
   };
 }
 
+function mapListingReview(row: Record<string, unknown>): ListingReview {
+  return {
+    id: String(row.id),
+    listingId: String(row.listing_id),
+    bookingId: row.booking_id ? String(row.booking_id) : '',
+    hostId: String(row.host_id),
+    travellerId: String(row.traveller_id),
+    travellerName: String(row.traveller_name || 'Tourx Traveller'),
+    rating: Math.max(1, Math.min(5, Math.round(Number(row.rating ?? 5)))),
+    comment: String(row.comment || ''),
+    verifiedStay: Boolean(row.verified_stay),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 async function ensureUserProfile(
   db: SupabaseClient,
   authUser: User,
@@ -442,6 +470,25 @@ async function ensureUserProfile(
     .maybeSingle();
 
   if (profileErr) {
+    if (!isAdminClient) {
+      return {
+        profile: {
+          uid: authUser.id,
+          displayName: fallbackName,
+          accountType: fallbackRole,
+          avatarUrl: clampString(meta.avatar_url, 500),
+          bio: '',
+        },
+        privateInfo: {
+          email: authUser.email || '',
+          phone: '',
+          payoutUpiId: '',
+          payeeName: fallbackName,
+          preferredPaymentApp: 'both',
+          paymentQrUrl: getHostQrFallback(authUser.id),
+        },
+      };
+    }
     throw new Error(`Failed to fetch user profile: ${profileErr.message}`);
   }
 
@@ -485,7 +532,7 @@ async function ensureUserProfile(
     .eq('uid', authUser.id)
     .maybeSingle();
 
-  if (privateErr) {
+  if (privateErr && isAdminClient) {
     throw new Error(`Failed to fetch private info: ${privateErr.message}`);
   }
 
@@ -1247,14 +1294,36 @@ async function startServer() {
     }
 
     try {
-      const { profile } = await ensureUserProfile(
-        req.dbClient,
-        req.authUser,
-        Boolean(req.isAdminClient),
-      );
+      let profileDisplayName = '';
+      try {
+        const { profile } = await ensureUserProfile(
+          req.dbClient,
+          req.authUser,
+          Boolean(req.isAdminClient),
+        );
+        profileDisplayName = profile.displayName;
+      } catch (profileLoadErr) {
+        if (req.isAdminClient) {
+          throw profileLoadErr;
+        }
+        profileDisplayName = req.authUser.email?.split('@')[0] || 'Tourx Host';
+      }
+
       const listingId = `lst_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const now = new Date().toISOString();
-      const cleanedHostName = clampString(hostName || profile.displayName, 80) || 'Tourx Host';
+      const cleanedHostName = clampString(hostName || profileDisplayName, 80) || 'Tourx Host';
+      const safeLat = Number.isFinite(Number(input.lat))
+        ? Math.max(-90, Math.min(90, Number(input.lat)))
+        : 15.2993;
+      const safeLng = Number.isFinite(Number(input.lng))
+        ? Math.max(-180, Math.min(180, Number(input.lng)))
+        : 74.124;
+      const safePrice = Number.isFinite(Number(input.pricePerUnitInr))
+        ? Math.max(100, Math.min(500000, Math.round(Number(input.pricePerUnitInr))))
+        : 1000;
+      const safeGuests = Number.isFinite(Number(input.maxGuests))
+        ? Math.max(1, Math.min(30, Math.round(Number(input.maxGuests))))
+        : 2;
 
       const { data: createdRow, error } = await req.dbClient
         .from('listings')
@@ -1267,11 +1336,11 @@ async function startServer() {
           description,
           location_name: locationName,
           country,
-          lat: Math.max(-90, Math.min(90, Number(input.lat))),
-          lng: Math.max(-180, Math.min(180, Number(input.lng))),
-          price_per_unit_inr: Math.max(100, Math.min(500000, Math.round(Number(input.pricePerUnitInr)))),
+          lat: safeLat,
+          lng: safeLng,
+          price_per_unit_inr: safePrice,
           unit_label: input.unitLabel,
-          max_guests: Math.max(1, Math.min(30, Math.round(Number(input.maxGuests)))),
+          max_guests: safeGuests,
           amenities: (input.amenities || []).slice(0, 12).map((a) => clampString(a, 60)),
           photos: input.photos.slice(0, 6),
           blocked_dates: (input.blockedDates || []).slice(0, 120),
@@ -1323,8 +1392,13 @@ async function startServer() {
 
       res.json({ id: listingId, listing: mapListing(createdRow as Record<string, unknown>) });
     } catch (err) {
-      console.warn('[Listings] Create error:', err instanceof Error ? err.message : err);
-      res.status(500).json({ error: 'Failed to create listing in Supabase.' });
+      const msg = err instanceof Error ? err.message : 'Failed to create listing in Supabase.';
+      console.warn('[Listings] Create error:', msg);
+      const isRls =
+        msg.toLowerCase().includes('row-level security') ||
+        msg.toLowerCase().includes('permission denied') ||
+        msg.includes('42501');
+      res.status(isRls ? 503 : 500).json({ error: msg });
     }
   });
 
@@ -1445,8 +1519,13 @@ async function startServer() {
 
       res.json(mapListing(updatedRow as Record<string, unknown>));
     } catch (err) {
-      console.warn('[Listings] Update error:', err instanceof Error ? err.message : err);
-      res.status(500).json({ error: 'Failed to update listing.' });
+      const msg = err instanceof Error ? err.message : 'Failed to update listing.';
+      console.warn('[Listings] Update error:', msg);
+      const isRls =
+        msg.toLowerCase().includes('row-level security') ||
+        msg.toLowerCase().includes('permission denied') ||
+        msg.includes('42501');
+      res.status(isRls ? 503 : 500).json({ error: msg });
     }
   });
 
@@ -1492,8 +1571,13 @@ async function startServer() {
 
         res.json(mapListing(updatedRow as Record<string, unknown>));
       } catch (err) {
-        console.warn('[Listings] Blocked dates error:', err instanceof Error ? err.message : err);
-        res.status(500).json({ error: 'Failed to update blocked dates.' });
+        const msg = err instanceof Error ? err.message : 'Failed to update blocked dates.';
+        console.warn('[Listings] Blocked dates error:', msg);
+        const isRls =
+          msg.toLowerCase().includes('row-level security') ||
+          msg.toLowerCase().includes('permission denied') ||
+          msg.includes('42501');
+        res.status(isRls ? 503 : 500).json({ error: msg });
       }
     },
   );
@@ -1524,8 +1608,13 @@ async function startServer() {
       if (delErr) throw new Error(delErr.message);
       res.json({ ok: true });
     } catch (err) {
-      console.warn('[Listings] Delete error:', err instanceof Error ? err.message : err);
-      res.status(500).json({ error: 'Failed to delete listing.' });
+      const msg = err instanceof Error ? err.message : 'Failed to delete listing.';
+      console.warn('[Listings] Delete error:', msg);
+      const isRls =
+        msg.toLowerCase().includes('row-level security') ||
+        msg.toLowerCase().includes('permission denied') ||
+        msg.includes('42501');
+      res.status(isRls ? 503 : 500).json({ error: msg });
     }
   });
 
@@ -1826,6 +1915,162 @@ async function startServer() {
       }
     },
   );
+
+  // --- Traveller Ratings & Reviews (Authenticated Only) ---
+  app.get('/api/reviews', requireSupabaseAuth, async (req: AuthedRequest, res) => {
+    if (!req.dbClient) return;
+
+    try {
+      const listingId = typeof req.query.listingId === 'string' ? req.query.listingId.trim() : '';
+      let query = req.dbClient
+        .from('listing_reviews')
+        .select('*')
+        .order('updated_at', { ascending: false });
+
+      if (listingId) {
+        query = query.eq('listing_id', listingId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        if (isMissingReviewsTableError(error.message)) {
+          res.json([]);
+          return;
+        }
+        throw new Error(error.message);
+      }
+
+      res.json((data || []).map((r) => mapListingReview(r as Record<string, unknown>)));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load reviews.';
+      console.warn('[Reviews] Fetch error:', msg);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.post('/api/reviews', requireSupabaseAuth, async (req: AuthedRequest, res) => {
+    if (!req.dbClient || !req.authUser) return;
+
+    const { listingId, hostId, bookingId, rating, comment, travellerName, verifiedStay } =
+      req.body as {
+        listingId?: string;
+        hostId?: string;
+        bookingId?: string;
+        rating?: number;
+        comment?: string;
+        travellerName?: string;
+        verifiedStay?: boolean;
+      };
+
+    const cleanListingId = clampString(listingId, 120);
+    const parsedRating = Math.round(Number(rating));
+    if (!cleanListingId || !Number.isFinite(parsedRating) || parsedRating < 1 || parsedRating > 5) {
+      res.status(400).json({ error: 'Please select a valid rating between 1 and 5 stars.' });
+      return;
+    }
+
+    try {
+      let resolvedHostId = clampString(hostId, 120);
+      const { data: listingRow } = await req.dbClient
+        .from('listings')
+        .select('id, host_id')
+        .eq('id', cleanListingId)
+        .maybeSingle();
+
+      if (listingRow && (listingRow as { host_id?: string }).host_id) {
+        resolvedHostId = String((listingRow as { host_id: string }).host_id);
+      }
+      if (!resolvedHostId) {
+        resolvedHostId = req.authUser.id;
+      }
+
+      let isVerifiedStay = Boolean(verifiedStay);
+      if (!isVerifiedStay) {
+        const { data: bookingCheck } = await req.dbClient
+          .from('bookings')
+          .select('id')
+          .eq('listing_id', cleanListingId)
+          .eq('traveller_id', req.authUser.id)
+          .neq('booking_status', 'cancelled')
+          .limit(1);
+        if (bookingCheck && bookingCheck.length > 0) {
+          isVerifiedStay = true;
+        }
+      }
+
+      const reviewId = `rv_${cleanListingId}_${req.authUser.id}`;
+      const now = new Date().toISOString();
+      const cleanName =
+        clampString(
+          travellerName ||
+            (req.authUser.user_metadata as { display_name?: string } | undefined)?.display_name ||
+            req.authUser.email?.split('@')[0],
+          80,
+        ) || 'Tourx Traveller';
+
+      const { data: savedRow, error: upsertErr } = await req.dbClient
+        .from('listing_reviews')
+        .upsert(
+          {
+            id: reviewId,
+            listing_id: cleanListingId,
+            booking_id: clampString(bookingId || '', 120),
+            host_id: resolvedHostId,
+            traveller_id: req.authUser.id,
+            traveller_name: cleanName,
+            rating: parsedRating,
+            comment: clampString(comment || '', 600),
+            verified_stay: isVerifiedStay,
+            updated_at: now,
+          },
+          { onConflict: 'id' },
+        )
+        .select('*')
+        .single();
+
+      if (upsertErr || !savedRow) {
+        const msg = upsertErr?.message || 'Unable to save review.';
+        if (
+          isMissingReviewsTableError(msg) ||
+          msg.toLowerCase().includes('row-level security') ||
+          msg.toLowerCase().includes('permission denied') ||
+          msg.includes('42501')
+        ) {
+          res.status(503).json({ error: msg });
+          return;
+        }
+        throw new Error(msg);
+      }
+
+      // Best-effort aggregate sync on listings table
+      try {
+        const { data: allListingReviews } = await req.dbClient
+          .from('listing_reviews')
+          .select('rating')
+          .eq('listing_id', cleanListingId);
+        if (allListingReviews && allListingReviews.length > 0) {
+          const count = allListingReviews.length;
+          const sum = allListingReviews.reduce(
+            (acc, r) => acc + Number((r as { rating: number }).rating || 0),
+            0,
+          );
+          const avg = Math.round((sum / count) * 10) / 10;
+          await req.dbClient
+            .from('listings')
+            .update({ rating: avg, review_count: count, updated_at: now })
+            .eq('id', cleanListingId);
+        }
+      } catch {
+        // Non-fatal if RLS prevents updating another host's listing row directly
+      }
+
+      res.json(mapListingReview(savedRow as Record<string, unknown>));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to submit rating.';
+      console.warn('[Reviews] Submit error:', msg);
+      res.status(500).json({ error: msg });
+    }
+  });
 
   // --- HTTP + WebSocket Server (/api/live Gemini Live API Bridge) ---
   const server = http.createServer(app);
